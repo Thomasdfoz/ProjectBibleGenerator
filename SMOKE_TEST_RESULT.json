@@ -1,16 +1,11 @@
 {
+  "version": "5.1.0",
   "syntax_ok": true,
-  "cli_ok": true,
-  "cli_stderr": "Spreadsheet runtime warmup failed during python startup\nTraceback (most recent call last):\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/patches/warm_spreadsheet_runtime_on_startup.py\", line 26, in warm_spreadsheet_runtime_on_startup\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/spreadsheet_warmup.py\", line 772, in warm_spreadsheet_runtime\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/connection.py\", line 37, in get_or_create_client\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/daemon.py\", line 124, in start_daemon\nTimeoutError: Timed out waiting for artifact tool daemon socket. Set ARTIFACT_TOOL_RPC_DAEMON_STARTUP_TIMEOUT_S=<seconds> to increase the limit.\n",
-  "rules_generated": true,
-  "guide_generated": true,
-  "index_generated": true,
-  "code_map_generated": true,
-  "custom_rule_present": true,
-  "guide_points_to_rules": true,
-  "guide_points_to_new_index": true,
-  "metadata_not_in_index": true,
-  "old_v3_files_absent": true,
-  "bundles_under_100": true,
-  "max_bundle_lines": 99
+  "blank_rules_auto_generated": true,
+  "rules_saved_to_project": true,
+  "generated_rules_detect_unity": true,
+  "rules_embedded_in_00_ai_rules": true,
+  "no_missing_rules_message": true,
+  "existing_custom_rules_preserved": true,
+  "exported_files": 2
 }

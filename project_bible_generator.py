@@ -26,13 +26,14 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 APP_NAME = "Project Bible Generator"
-APP_VERSION = "4.0.0"
+APP_VERSION = "5.1.0"
 CONFIG_FILENAME = ".projectbible.json"
 MANIFEST_FILENAME = "_projectbible_manifest.json"
 PROJECT_RULES_FILENAME = ".projectbible-rules.md"
 DEFAULT_OUTPUT_DIRNAME = "ProjectBible"
 
 CHATGPT_PROJECT_INSTRUCTION = """Before any technical task about this project, read and follow `00_AI_RULES.md` first. Then use `01_BIBLE_GUIDE.md` to navigate the Bible, `02_PROJECT_INDEX.md` to locate source files, `03_CODE_MAP.md` to understand the structure, and `98_RECENT_CHANGES.md` for recent work. Never treat generated bundle files as real source files; always use the original path shown after `FROM:`."""
+
 
 DEFAULT_MAX_LINES = 10_000
 DEFAULT_MAX_SOURCE_MB = 2.0
@@ -180,6 +181,345 @@ def default_config() -> dict:
         "git_diff_max_lines": 5000,
     }
 
+
+AUTO_UNCHECK_TOP_FOLDERS = {
+    "build", "builds", "dist", "out", "output", "outputs", "bin", "obj",
+    "generated", "generatedassets", "recordings", "captures", "profilecaptures",
+    "library", "temp", "logs", "usersettings", "cache", ".cache",
+    "node_modules", "vendor",
+}
+
+FOLDER_ROLE_HINTS = {
+    "assets": "primary project assets/source area",
+    "src": "primary source code",
+    "source": "primary source code",
+    "sources": "primary source code",
+    "server": "server/backend area",
+    "backend": "server/backend area",
+    "api": "API/backend area",
+    "client": "client area",
+    "frontend": "frontend/client area",
+    "web": "web application area",
+    "tests": "tests",
+    "test": "tests",
+    "scripts": "tooling/automation scripts",
+    "tools": "tooling",
+    "docs": "documentation",
+    "documentation": "documentation",
+    "packages": "package/dependency configuration",
+    "projectsettings": "project configuration",
+    ".github": "repository automation/workflows",
+}
+
+CODE_EXTENSIONS_FOR_PROFILE = {
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".cs", ".lua", ".py", ".js", ".jsx", ".ts", ".tsx", ".java",
+    ".kt", ".go", ".rs", ".php", ".rb", ".swift", ".html", ".css",
+    ".scss", ".sql", ".cmake", ".gradle", ".proto",
+}
+
+GENERATED_EXTENSIONS = {
+    ".exe", ".dll", ".pdb", ".obj", ".ilk", ".so", ".dylib", ".a", ".lib",
+}
+
+
+def recommended_top_folder_selected(name: str) -> bool:
+    lower = name.lower()
+    if lower.startswith(".") or lower.startswith("_"):
+        return False
+    if lower in AUTO_UNCHECK_TOP_FOLDERS:
+        return False
+    if lower in {"marketing", "screenshots", "profilecaptures", "recordings"}:
+        return False
+    return True
+
+
+def _limited_folder_profile(root: Path, folder: str, ignore_dirs: set[str], max_files: int = 8000) -> dict:
+    base = root / folder
+    profile = {
+        "files": 0,
+        "code_files": 0,
+        "generated_files": 0,
+        "extensions": {},
+        "subdirs": set(),
+    }
+    if not base.is_dir():
+        return profile
+
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        current = Path(dirpath)
+        rel_depth = len(current.relative_to(base).parts)
+
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in ignore_dirs
+            and d.lower() not in AUTO_UNCHECK_TOP_FOLDERS
+        ]
+
+        if rel_depth == 0:
+            profile["subdirs"].update(dirnames)
+
+        for filename in filenames:
+            profile["files"] += 1
+            ext = Path(filename).suffix.lower()
+            profile["extensions"][ext or "(none)"] = profile["extensions"].get(ext or "(none)", 0) + 1
+            if ext in CODE_EXTENSIONS_FOR_PROFILE:
+                profile["code_files"] += 1
+            if ext in GENERATED_EXTENSIONS:
+                profile["generated_files"] += 1
+            if profile["files"] >= max_files:
+                return profile
+
+    return profile
+
+
+def _detect_project_technologies(root: Path) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+
+    if (root / "Assets").is_dir() and (root / "ProjectSettings").is_dir():
+        detail = "Unity project (Assets/ + ProjectSettings/ detected)"
+        version_file = root / "ProjectSettings" / "ProjectVersion.txt"
+        if version_file.exists():
+            try:
+                first = version_file.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
+                if first:
+                    detail += f"; {first}"
+            except Exception:
+                pass
+        found.append(("Unity", detail))
+
+    if (root / "project.godot").exists():
+        found.append(("Godot", "Godot project (project.godot detected)"))
+
+    if list(root.glob("*.uproject")):
+        found.append(("Unreal Engine", "Unreal Engine project (.uproject detected)"))
+
+    package_json = root / "package.json"
+    if package_json.exists():
+        framework_bits = []
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            deps = {}
+            deps.update(package.get("dependencies") or {})
+            deps.update(package.get("devDependencies") or {})
+            for key, label in [
+                ("react", "React"), ("next", "Next.js"), ("vue", "Vue"),
+                ("@angular/core", "Angular"), ("vite", "Vite"),
+                ("electron", "Electron"), ("express", "Express"),
+                ("@nestjs/core", "NestJS"),
+            ]:
+                if key in deps and label not in framework_bits:
+                    framework_bits.append(label)
+        except Exception:
+            pass
+        detail = "Node/JavaScript project (package.json detected)"
+        if framework_bits:
+            detail += "; detected: " + ", ".join(framework_bits)
+        found.append(("Node", detail))
+
+    if (root / "pyproject.toml").exists() or (root / "requirements.txt").exists() or (root / "setup.py").exists():
+        found.append(("Python", "Python project metadata detected"))
+
+    if (root / "go.mod").exists():
+        found.append(("Go", "Go module (go.mod detected)"))
+
+    if (root / "Cargo.toml").exists():
+        found.append(("Rust", "Rust crate/workspace (Cargo.toml detected)"))
+
+    if (root / "CMakeLists.txt").exists():
+        found.append(("CMake", "CMake project (CMakeLists.txt detected)"))
+
+    if list(root.glob("*.sln")) or list(root.glob("*.slnx")) or list(root.glob("*.csproj")):
+        found.append((".NET", ".NET solution/project metadata detected"))
+
+    return found
+
+
+def _validation_rules_from_project(root: Path, technologies: list[tuple[str, str]]) -> list[str]:
+    rules: list[str] = []
+    tech_names = {name for name, _ in technologies}
+
+    if "Unity" in tech_names:
+        tests_present = any(
+            p.is_dir()
+            for p in [root / "Assets" / "Tests", root / "Assets" / "Editor" / "Tests", root / "Tests"]
+        )
+        rules.append(
+            "- For Unity changes, verify that the project compiles in Unity; "
+            + ("run the relevant existing Unity tests when practical." if tests_present else "run relevant existing Unity tests if present.")
+        )
+        rules.append("- Treat Unity `Library/`, `Temp/`, `Logs/` and build-output folders as generated, not authoritative source.")
+
+    if "Node" in tech_names:
+        package_json = root / "package.json"
+        manager = "npm"
+        if (root / "pnpm-lock.yaml").exists():
+            manager = "pnpm"
+        elif (root / "yarn.lock").exists():
+            manager = "yarn"
+
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            scripts = package.get("scripts") or {}
+            preferred = [name for name in ("test", "lint", "typecheck", "check", "build") if name in scripts]
+            if preferred:
+                commands = []
+                for name in preferred:
+                    commands.append(f"`npm run {name}`" if manager == "npm" else f"`{manager} {name}`")
+                rules.append("- Prefer the project's existing package scripts for validation when relevant: " + ", ".join(commands) + ".")
+        except Exception:
+            rules.append("- Use the project's existing package-manager scripts for validation when relevant.")
+
+    if "Python" in tech_names:
+        if (root / "pytest.ini").exists() or (root / "tests").is_dir() or (root / "pyproject.toml").exists():
+            rules.append("- For Python changes, use the existing test configuration (for example `pytest`) when the touched area is covered.")
+
+    if "Go" in tech_names:
+        rules.append("- For Go changes, prefer focused `go test` validation; use `go test ./...` when full-module validation is practical.")
+
+    if "Rust" in tech_names:
+        rules.append("- For Rust changes, prefer `cargo test` / `cargo check` for the relevant workspace or crate.")
+
+    if ".NET" in tech_names:
+        rules.append("- For .NET changes, prefer the existing solution/project build and test flow (`dotnet build` / `dotnet test`) when practical.")
+
+    if "CMake" in tech_names:
+        presets = root / "CMakePresets.json"
+        if presets.exists():
+            names = []
+            try:
+                obj = json.loads(presets.read_text(encoding="utf-8", errors="replace"))
+                for item in obj.get("configurePresets") or []:
+                    name = item.get("name")
+                    if name and not item.get("hidden"):
+                        names.append(name)
+            except Exception:
+                pass
+            if names:
+                shown = ", ".join(f"`{x}`" for x in names[:8])
+                rules.append(f"- CMake presets are present; prefer an existing relevant preset instead of inventing a new build flow. Available configure presets include: {shown}.")
+            else:
+                rules.append("- CMake presets are present; prefer the project's existing preset-based build flow.")
+        else:
+            rules.append("- For CMake changes, preserve the project's existing CMake build flow and validate the smallest relevant target.")
+
+    return rules
+
+
+def analyze_project_for_rules(root: Path, cfg: dict) -> str:
+    """Generate evidence-based AI rules from the currently selected project."""
+    root = root.expanduser().resolve()
+    selected_roots = list(cfg.get("selected_roots") or [])
+    ignore_dirs = set(cfg.get("ignore_dirs") or DEFAULT_IGNORE_DIRS)
+    technologies = _detect_project_technologies(root)
+
+    lines = [
+        f"# {root.name} — AI project rules",
+        "",
+        "> Auto-generated from the current local project structure by Project Bible Generator.",
+        "> Review these inferred rules before saving. They are based only on files/folders actually detected.",
+        "",
+        "## Detected project",
+        "",
+    ]
+
+    if technologies:
+        for _, detail in technologies:
+            lines.append(f"- {detail}.")
+    else:
+        lines.append("- No framework-specific project signature was confidently detected; use the source tree and existing local patterns as authority.")
+
+    lines += ["", "## Source roles", ""]
+
+    if not selected_roots:
+        lines.append("- No top-level source folders are currently selected for the Bible.")
+    else:
+        for folder in selected_roots:
+            profile = _limited_folder_profile(root, folder, ignore_dirs)
+            lower = folder.lower()
+            hinted = FOLDER_ROLE_HINTS.get(lower)
+
+            if hinted:
+                role = hinted
+            elif lower in AUTO_UNCHECK_TOP_FOLDERS:
+                role = "generated/build/output area"
+            elif profile["code_files"] > 0:
+                role = "source/code area"
+            else:
+                role = "project content/data area"
+
+            ext_top = sorted(profile["extensions"].items(), key=lambda kv: (-kv[1], kv[0]))[:4]
+            ext_text = ", ".join(f"{ext} ({count})" for ext, count in ext_top if ext != "(none)")
+            evidence = f"{profile['files']:,} files scanned"
+            if profile["code_files"]:
+                evidence += f", {profile['code_files']:,} source-like files"
+            if ext_text:
+                evidence += f"; common extensions: {ext_text}"
+
+            lines.append(f"- `{folder}/` — inferred as **{role}** ({evidence}).")
+
+    generated_present = []
+    try:
+        for p in root.iterdir():
+            if p.is_dir() and (
+                p.name.lower() in AUTO_UNCHECK_TOP_FOLDERS
+                or p.name.lower().startswith("build")
+                or p.name.lower().startswith("output")
+            ):
+                generated_present.append(p.name)
+    except Exception:
+        pass
+
+    if generated_present:
+        lines += ["", "## Generated / non-authoritative areas", ""]
+        for name in sorted(set(generated_present), key=str.lower):
+            lines.append(f"- Treat `{name}/` as generated/output unless a task explicitly targets that area; do not prefer it over editable source.")
+
+    hidden_present = []
+    try:
+        hidden_present = sorted(
+            [p.name for p in root.iterdir() if p.is_dir() and (p.name.startswith(".") or p.name.startswith("_"))],
+            key=str.lower,
+        )
+    except Exception:
+        pass
+
+    if hidden_present:
+        lines += ["", "## Repository/tooling metadata", ""]
+        lines.append(
+            "- Hidden/tooling folders detected at the project root: "
+            + ", ".join(f"`{name}/`" for name in hidden_present[:20])
+            + ". Do not treat these as primary application source unless the task explicitly concerns tooling or repository automation."
+        )
+
+    lines += [
+        "",
+        "## Change policy",
+        "",
+        "- Follow the architecture and conventions already present in the relevant source area.",
+        "- Prefer the smallest coherent implementation that satisfies the requested task.",
+        "- When multiple similarly named source/runtime/generated copies exist, inspect their contents and project references before deciding which one is authoritative; do not guess.",
+        "- Do not modify build outputs, caches or generated artifacts as the primary fix when an editable source exists.",
+        "",
+        "## Validation",
+        "",
+    ]
+
+    validation = _validation_rules_from_project(root, technologies)
+    if validation:
+        lines.extend(validation)
+    else:
+        lines.append("- Use the project's existing tests/build/check scripts closest to the changed area. If no practical validation is available, state exactly what remains unverified.")
+
+    if (root / ".git").exists():
+        lines += [
+            "",
+            "## Repository",
+            "",
+            "- This folder is a Git working tree. Use the current Project Bible Git branch/HEAD metadata to identify the snapshot being analyzed.",
+        ]
+
+    return "\n".join(lines).strip() + "\n"
 
 def normalize_rel(path: Path) -> str:
     return path.as_posix()
@@ -1262,6 +1602,10 @@ def launch_gui() -> None:
             self.generate_btn = ttk.Button(action_bar, text="GENERATE BIBLE", style="Primary.TButton", command=self.start_generate)
             self.generate_btn.pack(side="left", padx=8)
             ttk.Button(action_bar, text="Open output", command=self.open_output).pack(side="left")
+            ttk.Label(
+                action_bar,
+                text="Rules blank? They will be generated automatically.",
+            ).pack(side="left", padx=(12, 0))
 
             ttk.Label(action_bar, textvariable=self.stats_var).pack(side="right")
 
@@ -1319,53 +1663,86 @@ def launch_gui() -> None:
             f.columnconfigure(0, weight=1)
             f.rowconfigure(2, weight=1)
 
-            ttk.Label(f, text="Project-specific AI rules", style="Section.TLabel").grid(
-                row=0, column=0, sticky="w"
-            )
-            ttk.Label(
-                f,
-                text=(
-                    "Optional rules for this specific project. They are appended to the mandatory "
-                    "generic rules and generated inside 00_AI_RULES.md. "
-                    f"They are stored locally as {PROJECT_RULES_FILENAME}."
-                ),
-                wraplength=950,
-            ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+            header = ttk.Frame(f)
+            header.grid(row=0, column=0, sticky="ew")
+            header.columnconfigure(0, weight=1)
 
-            self.project_rules_text = tk.Text(f, wrap="word")
+            title_block = ttk.Frame(header)
+            title_block.grid(row=0, column=0, sticky="w")
+            ttk.Label(title_block, text="Project-specific AI rules", style="Section.TLabel").pack(anchor="w")
+            ttk.Label(
+                title_block,
+                text=(
+                    "Generate rules from the project currently selected on the Project Bible tab. "
+                    "The analyzer uses the real project structure and detected files — no fixed game/framework template."
+                ),
+                wraplength=700,
+            ).pack(anchor="w", pady=(3, 0))
+
+            action_block = ttk.Frame(header)
+            action_block.grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+            self.analyze_rules_btn = ttk.Button(
+                action_block,
+                text="ANALYZE PROJECT && GENERATE RULES",
+                style="Primary.TButton",
+                command=self.generate_rules_from_project,
+            )
+            self.analyze_rules_btn.pack(side="left")
+            ttk.Button(action_block, text="Save", command=self.save_rules_only).pack(side="left", padx=(6, 0))
+            ttk.Button(action_block, text="Reload", command=self.reload_project_rules).pack(side="left", padx=(6, 0))
+            ttk.Button(
+                action_block,
+                text="Clear",
+                command=lambda: self.project_rules_text.delete("1.0", "end"),
+            ).pack(side="left", padx=(6, 0))
+
+            self.rules_status_var = tk.StringVar(
+                value="Choose a project, then click Analyze Project & Generate Rules."
+            )
+            ttk.Label(f, textvariable=self.rules_status_var).grid(
+                row=1, column=0, sticky="w", pady=(8, 5)
+            )
+
+            self.project_rules_text = tk.Text(f, wrap="word", undo=True)
             self.project_rules_text.grid(row=2, column=0, sticky="nsew")
 
-            rules_buttons = ttk.Frame(f)
-            rules_buttons.grid(row=3, column=0, sticky="w", pady=(8, 14))
-            ttk.Button(rules_buttons, text="Save project rules", command=self.save_rules_only).pack(side="left")
-            ttk.Button(rules_buttons, text="Reload from project", command=self.reload_project_rules).pack(side="left", padx=6)
-            ttk.Button(rules_buttons, text="Clear", command=lambda: self.project_rules_text.delete("1.0", "end")).pack(side="left")
+            bottom = ttk.Panedwindow(f, orient="horizontal")
+            bottom.grid(row=3, column=0, sticky="ew", pady=(10, 0))
 
-            ttk.Separator(f).grid(row=4, column=0, sticky="ew", pady=(0, 12))
+            built_frame = ttk.LabelFrame(bottom, text="Built-in rules (always included)", padding=8)
+            instruction_frame = ttk.LabelFrame(bottom, text="ChatGPT Project instruction", padding=8)
+            bottom.add(built_frame, weight=1)
+            bottom.add(instruction_frame, weight=1)
 
-            ttk.Label(f, text="ChatGPT Project instruction", style="Section.TLabel").grid(
-                row=5, column=0, sticky="w"
+            built_frame.columnconfigure(0, weight=1)
+            instruction_frame.columnconfigure(0, weight=1)
+
+            built_in = tk.Text(built_frame, height=7, wrap="word")
+            built_in.grid(row=0, column=0, sticky="ew")
+            built_in.insert(
+                "1.0",
+                "• Use original source paths after FROM:, never generated bundle paths.\n"
+                "• Do not invent code/details that were not found.\n"
+                "• Prefer minimal scoped changes; avoid unrelated refactors.\n"
+                "• Use Index / Code Map instead of reading the entire Bible.\n"
+                "• Use Recent Changes for recent work.\n"
+                "• When practical: original path + BEFORE + AFTER + reason + validation.\n"
+                "• If source is stale/missing, say so instead of guessing."
             )
-            ttk.Label(
-                f,
-                text=(
-                    "Paste this short instruction into the ChatGPT Project instructions. "
-                    "The project-specific behavior then lives in 00_AI_RULES.md instead of being duplicated in ChatGPT settings."
-                ),
-                wraplength=950,
-            ).grid(row=6, column=0, sticky="w", pady=(4, 6))
+            built_in.configure(state="disabled")
 
-            instruction = tk.Text(f, height=5, wrap="word")
-            instruction.grid(row=7, column=0, sticky="ew")
+            instruction = tk.Text(instruction_frame, height=7, wrap="word")
+            instruction.grid(row=0, column=0, sticky="ew")
             instruction.insert("1.0", CHATGPT_PROJECT_INSTRUCTION)
             instruction.configure(state="disabled")
             self.chatgpt_instruction_text = instruction
 
             ttk.Button(
-                f,
-                text="Copy ChatGPT instruction",
+                instruction_frame,
+                text="Copy instruction",
                 command=self.copy_chatgpt_instruction,
-            ).grid(row=8, column=0, sticky="w", pady=(8, 0))
+            ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         def _build_advanced(self):
             f = self.advanced_tab
@@ -1481,8 +1858,9 @@ def launch_gui() -> None:
             self._set_lines(self.exclude_paths_text, cfg.get("exclude_path_prefixes", []))
 
             selected = set(cfg.get("selected_roots", []))
-            for name, var in self.folder_vars.items():
-                var.set(name in selected if selected else True)
+            if selected:
+                for name, var in self.folder_vars.items():
+                    var.set(name in selected)
 
         def choose_project(self):
             path = filedialog.askdirectory(title="Choose project folder")
@@ -1527,7 +1905,7 @@ def launch_gui() -> None:
 
             columns = 4
             for index, name in enumerate(folders):
-                var = tk.BooleanVar(value=True)
+                var = tk.BooleanVar(value=recommended_top_folder_selected(name))
                 self.folder_vars[name] = var
                 cb = ttk.Checkbutton(self.folder_inner, text=name, variable=var)
                 cb.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 28), pady=3)
@@ -1597,10 +1975,27 @@ def launch_gui() -> None:
             self.busy = True
             self.scan_btn.configure(state="disabled")
             self.generate_btn.configure(state="disabled")
-            self.status_var.set("Generating...")
+            if hasattr(self, "analyze_rules_btn"):
+                self.analyze_rules_btn.configure(state="disabled")
+            self.status_var.set("Preparing Bible...")
 
             def worker():
                 try:
+                    # A Bible without project-specific rules is easy to create by
+                    # accident. Generate them automatically only when the rules
+                    # editor/config is truly blank. Existing user-authored rules
+                    # are never overwritten here.
+                    rules_text = str(cfg.get("project_rules") or "").strip()
+                    if not rules_text:
+                        self.ui_queue.put((
+                            "status",
+                            "Project rules are blank — analyzing project automatically..."
+                        ))
+                        rules_text = analyze_project_for_rules(root, cfg).strip()
+                        cfg["project_rules"] = rules_text
+                        save_project_rules(root, rules_text)
+                        self.ui_queue.put(("auto_rules_generated", rules_text))
+
                     result = export_project(
                         root,
                         output,
@@ -1681,8 +2076,31 @@ def launch_gui() -> None:
                     rules = load_project_rules(root)
                     if rules:
                         self.project_rules_text.insert("1.0", rules)
-            except Exception:
-                pass
+                        if hasattr(self, "rules_status_var"):
+                            self.rules_status_var.set(f"Loaded saved rules from {PROJECT_RULES_FILENAME}.")
+                    elif hasattr(self, "rules_status_var"):
+                        self.rules_status_var.set("No saved rules for this project. Click Analyze Project & Generate Rules.")
+                elif hasattr(self, "rules_status_var"):
+                    self.rules_status_var.set("Choose a project first.")
+            except Exception as exc:
+                if hasattr(self, "rules_status_var"):
+                    self.rules_status_var.set(f"Could not load project rules: {exc}")
+
+        def generate_rules_from_project(self):
+            try:
+                root, _ = self.validate_paths()
+                cfg = self.current_config()
+                rules = analyze_project_for_rules(root, cfg)
+                self.project_rules_text.delete("1.0", "end")
+                self.project_rules_text.insert("1.0", rules)
+                selected = len(cfg.get("selected_roots") or [])
+                if hasattr(self, "rules_status_var"):
+                    self.rules_status_var.set(
+                        f"Generated from {root.name}: {selected} selected top-level folder(s). Review the rules, then click Save."
+                    )
+                self.status_var.set("AI rules generated from the current project.")
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Could not analyze project:\\n{exc}")
 
         def save_rules_only(self):
             try:
@@ -1754,6 +2172,17 @@ def launch_gui() -> None:
                                 "Scan completed with warnings:\n\n" + "\n".join(f"• {w}" for w in warnings),
                             )
 
+                    elif kind == "auto_rules_generated":
+                        # Reflect automatically generated rules in the editor
+                        # without requiring the user to visit/reload the tab.
+                        if hasattr(self, "project_rules_text"):
+                            self.project_rules_text.delete("1.0", "end")
+                            self.project_rules_text.insert("1.0", payload)
+                        if hasattr(self, "rules_status_var"):
+                            self.rules_status_var.set(
+                                "Rules were generated automatically because they were blank, and saved to .projectbible-rules.md."
+                            )
+
                     elif kind == "generate_done":
                         result = payload
                         self.status_var.set("Bible generated successfully.")
@@ -1780,6 +2209,8 @@ def launch_gui() -> None:
                         self.busy = False
                         self.scan_btn.configure(state="normal")
                         self.generate_btn.configure(state="normal")
+                        if hasattr(self, "analyze_rules_btn"):
+                            self.analyze_rules_btn.configure(state="normal")
 
             except queue.Empty:
                 pass
