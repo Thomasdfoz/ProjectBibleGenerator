@@ -1,162 +1,130 @@
-# Project Bible Generator v2
+# Project Bible Generator v3
 
-**Turn any project into an AI-readable code bible.**
+A generic desktop utility for turning **any source project** into a searchable Markdown “Bible” for AI tools and ChatGPT Projects.
 
-A GUI-first utility for converting source projects into searchable Markdown bundles that can be uploaded as **Sources** in a ChatGPT Project.
+## v3: simplified interface
 
-## Why this exists
+The UI now has only two tabs.
 
-Instead of making ChatGPT repeatedly crawl a repository, Project Bible Generator creates a textual snapshot of the project with each original path preserved:
+### Project Bible
 
-```md
-## FROM: `Client/modules/game_idle/squad.lua`
-- SHA256: `...`
-- SOURCE_LINES: 847
-- SOURCE_BYTES: 24012
+This is the screen you use every day:
 
-```lua
--- original source code
-```
-```
+1. Choose the source project folder.
+2. Choose the output folder.
+3. Check/uncheck the project folders that should be included.
+4. Click **SCAN PROJECT**.
+5. Review the preview.
+6. Click **GENERATE BIBLE**.
 
-ChatGPT can then search the Bible, tell you exactly which real file to edit, and provide a focused before/after patch.
+There are no framework-specific or project-specific buttons.
 
-## GUI features
+### Advanced Settings
 
-The app has five tabs:
+Only open this when you need it.
 
-### 1. Project
+You can change:
 
-- Choose the source project folder.
-- Choose the Bible output folder.
-- Choose a preset.
-- Max lines per bundle (default: 10,000).
-- Max source-file size.
-- Respect `.gitignore`.
-- Include root files.
-- Include Git status/diff.
+- included source extensions;
+- ignored directory names;
+- ignored glob patterns;
+- specific excluded relative paths;
+- special filenames;
+- root file inclusion;
+- maximum source-file size;
+- Git status/diff behavior.
 
-### 2. Include
+## Important v3 fixes
 
-- Multi-select top-level folders.
-- Multi-select allowed file extensions.
-- Edit special filenames such as `CMakeLists.txt`, `Dockerfile`, `package.json`, etc.
-- Quick `Canary + Client` selector.
-- Quick `Code essentials` selector.
+### Generation always rescans
 
-### 3. Ignore
+v2 could reuse an old Preview after the inclusion settings changed.
 
-- Edit ignored directory names.
-- Edit ignored glob patterns.
-- Exclude specific relative path prefixes.
-- Restore defaults.
-- Apply Tibia Idle ignore rules.
+v3 always performs a fresh scan using the current settings when **GENERATE BIBLE** is clicked.
 
-### 4. Preview
+### Folder warnings
 
-Before creating anything, click **SCAN PROJECT**.
-
-The preview shows:
-
-- Included / Ignored
-- original path
-- why the file was included/ignored
-- lines
-- size
-
-There is also search and Included/Ignored filtering.
-
-Statistics include an approximate raw-text token count.
-
-### 5. Generate
-
-Click **GENERATE PROJECT BIBLE**.
-
-The operation runs in a background thread so the interface does not freeze.
-
-## Tibia Idle preset
-
-The built-in preset:
-
-**Tibia Idle (Canary + Client)**
-
-selects:
-
-- `Canary`
-- `Client`
-
-and applies sensible ignore rules for source-code analysis.
-
-Everything remains editable before scanning/generation.
-
-## Generated files
+If you selected a folder and it produces zero included source files, the app warns you.
 
 Example:
+
+```text
+Selected folder "Client" has 0 included files.
+```
+
+This prevents accidentally generating an incomplete Bible without noticing.
+
+### Clear folder checkboxes
+
+Folders are now normal checkboxes.
+
+No blue multi-selection list.
+
+### Extensions moved to Advanced Settings
+
+Most users do not need to manually select 40 source extensions every time.
+
+Recommended source extensions are enabled by default.
+
+### Git identity
+
+Generated support files include:
+
+- current Git branch;
+- current Git HEAD commit.
+
+### Generator output removed from Git status
+
+If the Bible is generated inside the repository, the output folder is filtered out of the `98_RECENT_CHANGES.md` Git status section.
+
+### New `02_CODE_MAP.md`
+
+A compact source map is generated in addition to the full tree.
+
+## Generated output
 
 ```text
 ProjectBible/
 ├── 00_PROJECT_INDEX.md
 ├── 01_AI_INSTRUCTIONS.md
-├── 10_Canary_001.md
-├── 10_Canary_002.md
-├── 20_Client_001.md
-├── 20_Client_002.md
+├── 02_CODE_MAP.md
+├── 10_ROOT_001.md
+├── 20_SourceFolder_001.md
+├── 20_SourceFolder_002.md
+├── ...
 ├── 98_RECENT_CHANGES.md
 ├── 99_PROJECT_TREE.md
 └── _projectbible_manifest.json
 ```
 
-### 00_PROJECT_INDEX.md
+## Original source paths
 
-Maps every real source path to its generated bundle and contains:
+Every source section keeps the real path:
 
-- path
-- bundle
-- line count
-- byte size
-- SHA-256
-- changed files since previous export
+```md
+## FROM: `src/services/users.ts`
+- SHA256: `...`
+- SOURCE_LINES: 240
+- SOURCE_BYTES: 8124
 
-### 01_AI_INSTRUCTIONS.md
-
-Instructions for an AI consuming the Bible.
-
-### 98_RECENT_CHANGES.md
-
-Contains:
-
-- files added since previous Bible generation
-- files modified
-- files removed
-- current Git status
-- local unstaged diff
-- staged diff
-
-### 99_PROJECT_TREE.md
-
-A tree containing only files actually included in the Bible.
-
-## 10,000-line rule
-
-Bundles have a hard maximum of 10,000 lines by default.
-
-The generator tries to keep a real source file together. If it would not fit in the current bundle, the entire source file starts in the next bundle.
-
-A source file is only split into `PART 1/N`, `PART 2/N`, etc. when that single source file is itself too large to fit.
-
-## Project configuration
-
-Click **Save Project Config** in the app.
-
-It creates:
-
-```text
-.projectbible.json
+```typescript
+// source code
+```
 ```
 
-in the source project root.
+The generated bundle filename is never treated as the real source path.
 
-Opening that project again reloads the configuration.
+## Bundle limit
+
+Default:
+
+```text
+10,000 lines per bundle
+```
+
+A source file stays together whenever possible.
+
+A source file is split only if that single source file cannot fit inside one bundle.
 
 ## Windows
 
@@ -168,39 +136,4 @@ RUN_Project_Bible_Generator.bat
 
 Python 3.10+ is recommended.
 
-No `pip install` is required.
-
-## CLI (optional)
-
-The GUI is the intended workflow, but a CLI is included.
-
-```powershell
-python project_bible_generator.py --project "C:\Projects\Tibia-idle" --preset tibia-idle
-```
-
-Only Canary + Client:
-
-```powershell
-python project_bible_generator.py --project "C:\Projects\Tibia-idle" --roots Canary Client
-```
-
-Different line limit:
-
-```powershell
-python project_bible_generator.py --project "C:\Projects\Tibia-idle" --max-lines 10000
-```
-
-## Recommended workflow
-
-1. Open Project Bible Generator.
-2. Select the local project.
-3. Choose the preset.
-4. Review Include/Ignore settings.
-5. **Scan Project**.
-6. Verify the preview.
-7. **Generate Project Bible**.
-8. Upload the generated `.md` files to your ChatGPT Project Sources.
-9. Ask ChatGPT for a task.
-10. ChatGPT returns the exact real source path and the before/after code.
-11. Apply it locally and test.
-12. Generate the Bible again after meaningful code changes.
+No pip packages are required.

@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Project Bible Generator v2
-Turn any project into an AI-readable code bible.
+Project Bible Generator v3
+Generic GUI-first utility to turn source projects into AI-readable Markdown bundles.
 
-GUI-first, standard-library-only utility.
-
-Main features
--------------
-- Choose source project and output folder.
-- Select which top-level folders are included.
-- Select which extensions/special filenames are included.
-- Edit ignored folders, ignored glob patterns and excluded path prefixes.
-- Optional .gitignore support.
-- Maximum source-file size.
-- Maximum generated bundle size in lines (10,000 by default).
-- Preview scan showing Included/Ignored + reason.
-- Search/filter the preview.
-- Project presets, including Tibia Idle (Canary + Client).
-- Per-project configuration file.
-- Project index, project tree, recent changes and Git diff.
-- Snapshot manifest to detect added/modified/removed files.
-- Keeps original source paths in every generated section.
-- Avoids splitting a source file unless that single source file is too large.
-
-Python 3.10+ recommended. No pip packages required.
+No project-specific presets or buttons.
+No third-party dependencies.
 """
 
 from __future__ import annotations
@@ -45,10 +26,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 APP_NAME = "Project Bible Generator"
-APP_VERSION = "2.0.0"
-
+APP_VERSION = "3.0.0"
 CONFIG_FILENAME = ".projectbible.json"
-LEGACY_CONFIG_FILENAME = ".projecttoai.json"
 MANIFEST_FILENAME = "_projectbible_manifest.json"
 DEFAULT_OUTPUT_DIRNAME = "ProjectBible"
 
@@ -104,7 +83,7 @@ DEFAULT_IGNORE_DIRS = [
     ".next", ".nuxt", ".cache",
     "vendor",
     DEFAULT_OUTPUT_DIRNAME,
-    "ChatGPTProject",  # old ProjectToAI default, prevent recursive snapshots
+    "ChatGPTProject",
 ]
 
 DEFAULT_IGNORE_GLOBS = [
@@ -143,24 +122,12 @@ LANGUAGE_MAP = {
     ".cmake": "cmake", ".gradle": "gradle", ".proto": "protobuf",
 }
 
-TIBIA_IDLE_EXTRA_IGNORE_DIRS = [
-    "research-assets",
-]
-
-TIBIA_IDLE_EXTRA_IGNORE_GLOBS = [
-    "*.map",
-    "*.pak",
-    "*.cache",
-    "*.log",
-]
-
 
 @dataclass
 class ScanRow:
     path: str
     status: str
     reason: str
-    extension: str
     size_bytes: int
     lines: int
     group: str
@@ -191,11 +158,11 @@ class ExportResult:
     added: int
     modified: int
     removed: int
+    folder_counts: dict[str, int]
 
 
 def default_config() -> dict:
     return {
-        "preset": "Default",
         "selected_roots": [],
         "extensions": list(DEFAULT_EXTENSIONS),
         "special_filenames": list(DEFAULT_SPECIAL_FILENAMES),
@@ -211,17 +178,6 @@ def default_config() -> dict:
     }
 
 
-def tibia_idle_config() -> dict:
-    cfg = default_config()
-    cfg.update({
-        "preset": "Tibia Idle (Canary + Client)",
-        "selected_roots": ["Canary", "Client"],
-        "ignore_dirs": sorted(set(DEFAULT_IGNORE_DIRS + TIBIA_IDLE_EXTRA_IGNORE_DIRS), key=str.lower),
-        "ignore_globs": sorted(set(DEFAULT_IGNORE_GLOBS + TIBIA_IDLE_EXTRA_IGNORE_GLOBS), key=str.lower),
-    })
-    return cfg
-
-
 def normalize_rel(path: Path) -> str:
     return path.as_posix()
 
@@ -230,22 +186,16 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def safe_json_load(path: Path) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except Exception:
-        return {}
-
-
 def load_config(project_root: Path) -> dict:
     cfg = default_config()
     path = project_root / CONFIG_FILENAME
-    legacy = project_root / LEGACY_CONFIG_FILENAME
     if path.exists():
-        cfg.update(safe_json_load(path))
-    elif legacy.exists():
-        cfg.update(safe_json_load(legacy))
+        try:
+            user = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(user, dict):
+                cfg.update(user)
+        except Exception:
+            pass
     return cfg
 
 
@@ -263,7 +213,7 @@ def read_text_file(path: Path) -> tuple[str, str]:
         try:
             return data.decode(enc), enc
         except UnicodeDecodeError:
-            pass
+            continue
     return data.decode("utf-8", errors="replace"), "utf-8-replace"
 
 
@@ -272,11 +222,7 @@ def count_lines(text: str) -> int:
 
 
 class GitIgnoreMatcher:
-    """
-    Lightweight matcher for common .gitignore rules.
-    It is intentionally not a byte-for-byte reimplementation of Git,
-    but handles ordinary path, glob, directory and negation patterns.
-    """
+    """Small .gitignore matcher covering common rules."""
 
     def __init__(self, root: Path):
         self.rules: list[tuple[str, bool, bool]] = []
@@ -287,6 +233,7 @@ class GitIgnoreMatcher:
             text = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return
+
         for raw in text.splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -308,7 +255,7 @@ class GitIgnoreMatcher:
             return fnmatch.fnmatch(rel, pat)
         if "/" in pat:
             return fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, f"*/{pat}")
-        return any(fnmatch.fnmatch(segment, pat) for segment in rel.split("/"))
+        return any(fnmatch.fnmatch(part, pat) for part in rel.split("/"))
 
     def ignored(self, rel: str, is_dir: bool) -> bool:
         state = False
@@ -321,22 +268,10 @@ class GitIgnoreMatcher:
                 matched = any(self._matches(parent, pattern) for parent in parents)
             else:
                 matched = self._matches(rel, pattern)
+
             if matched:
                 state = not negated
         return state
-
-
-def match_ignore_glob(rel_path: str, filename: str, globs: Iterable[str]) -> Optional[str]:
-    rel_l = rel_path.lower()
-    name_l = filename.lower()
-    for raw in globs:
-        pattern = str(raw).strip()
-        if not pattern:
-            continue
-        p = pattern.lower()
-        if fnmatch.fnmatch(name_l, p) or fnmatch.fnmatch(rel_l, p):
-            return pattern
-    return None
 
 
 def top_group(rel: Path) -> str:
@@ -352,8 +287,8 @@ def language_for(path: str) -> str:
     return LANGUAGE_MAP.get(p.suffix.lower(), "text")
 
 
-def matches_excluded_prefix(rel_str: str, prefixes: Iterable[str]) -> Optional[str]:
-    normalized = rel_str.replace("\\", "/").strip("/")
+def matches_excluded_prefix(rel: str, prefixes: Iterable[str]) -> Optional[str]:
+    normalized = rel.replace("\\", "/").strip("/")
     for raw in prefixes:
         prefix = str(raw).strip().replace("\\", "/").strip("/")
         if not prefix:
@@ -363,18 +298,27 @@ def matches_excluded_prefix(rel_str: str, prefixes: Iterable[str]) -> Optional[s
     return None
 
 
-def classify_path(
+def match_ignore_glob(rel: str, name: str, patterns: Iterable[str]) -> Optional[str]:
+    rel_l = rel.lower()
+    name_l = name.lower()
+    for raw in patterns:
+        pattern = str(raw).strip()
+        if not pattern:
+            continue
+        p = pattern.lower()
+        if fnmatch.fnmatch(name_l, p) or fnmatch.fnmatch(rel_l, p):
+            return pattern
+    return None
+
+
+def classify_file(
     path: Path,
     root: Path,
     output_dir: Path,
     cfg: dict,
     gitignore: GitIgnoreMatcher,
 ) -> tuple[str, str]:
-    try:
-        rel = path.relative_to(root)
-    except ValueError:
-        return "Ignored", "outside project"
-
+    rel = path.relative_to(root)
     rel_str = normalize_rel(rel)
 
     try:
@@ -389,18 +333,18 @@ def classify_path(
 
     selected_roots = set(cfg.get("selected_roots", []))
     if len(rel.parts) > 1 and selected_roots and rel.parts[0] not in selected_roots:
-        return "Ignored", f"top folder not selected: {rel.parts[0]}"
+        return "Ignored", f"folder not selected: {rel.parts[0]}"
 
     if len(rel.parts) == 1 and not cfg.get("include_root_files", True):
         return "Ignored", "root files disabled"
 
-    prefix = matches_excluded_prefix(rel_str, cfg.get("exclude_path_prefixes", []))
-    if prefix:
-        return "Ignored", f"excluded path: {prefix}"
+    excluded = matches_excluded_prefix(rel_str, cfg.get("exclude_path_prefixes", []))
+    if excluded:
+        return "Ignored", f"excluded path: {excluded}"
 
-    ignored_glob = match_ignore_glob(rel_str, path.name, cfg.get("ignore_globs", []))
-    if ignored_glob:
-        return "Ignored", f"ignored pattern: {ignored_glob}"
+    pattern = match_ignore_glob(rel_str, path.name, cfg.get("ignore_globs", []))
+    if pattern:
+        return "Ignored", f"ignored pattern: {pattern}"
 
     if cfg.get("respect_gitignore", True) and gitignore.ignored(rel_str, False):
         return "Ignored", ".gitignore"
@@ -408,7 +352,7 @@ def classify_path(
     try:
         size = path.stat().st_size
     except Exception:
-        return "Ignored", "cannot stat"
+        return "Ignored", "cannot read metadata"
 
     max_bytes = int(float(cfg.get("max_source_file_mb", DEFAULT_MAX_SOURCE_MB)) * 1024 * 1024)
     if size > max_bytes:
@@ -420,16 +364,16 @@ def classify_path(
     ext = path.suffix.lower()
     allowed = {str(x).lower() for x in cfg.get("extensions", [])}
     if ext not in allowed:
-        return "Ignored", f"extension not selected: {ext or '(none)'}"
+        return "Ignored", f"extension not included: {ext or '(none)'}"
 
     try:
         sample = path.read_bytes()[:4096]
         if b"\x00" in sample:
-            return "Ignored", "binary/NUL"
+            return "Ignored", "binary file"
     except Exception:
-        return "Ignored", "cannot read"
+        return "Ignored", "cannot read file"
 
-    return "Included", "selected source"
+    return "Included", "source file"
 
 
 def scan_project(
@@ -437,7 +381,6 @@ def scan_project(
     output_dir: Path,
     cfg: dict,
     progress=None,
-    stop_event: Optional[threading.Event] = None,
 ) -> list[ScanRow]:
     root = root.resolve()
     output_dir = output_dir.resolve()
@@ -445,22 +388,19 @@ def scan_project(
     rows: list[ScanRow] = []
     seen = 0
 
-    def emit(message: str):
+    def emit(msg: str):
         if progress:
-            progress(message)
+            progress(msg)
 
+    # IMPORTANT:
+    # We only prune known globally ignored folders / generated output.
+    # We do NOT prune unselected top-level folders here. That lets Preview show
+    # "folder not selected" instead of silently hiding them.
     ignore_dirs = set(cfg.get("ignore_dirs", []))
-    selected_roots = set(cfg.get("selected_roots", []))
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        if stop_event and stop_event.is_set():
-            break
-
         current = Path(dirpath)
 
-        # Fast pruning of directories. Ignored files inside a pruned directory
-        # are intentionally not listed in preview; the directory itself is already
-        # an explicit rule.
         kept = []
         for d in dirnames:
             candidate = current / d
@@ -475,14 +415,13 @@ def scan_project(
             except ValueError:
                 pass
 
-            if len(rel.parts) == 1 and selected_roots and d not in selected_roots:
+            excluded = matches_excluded_prefix(normalize_rel(rel), cfg.get("exclude_path_prefixes", []))
+            if excluded:
                 continue
 
+            # Keep gitignored directories traversable only if needed? For speed,
+            # prune them because the reason is already defined by .gitignore.
             if cfg.get("respect_gitignore", True) and matcher.ignored(normalize_rel(rel), True):
-                continue
-
-            prefix = matches_excluded_prefix(normalize_rel(rel), cfg.get("exclude_path_prefixes", []))
-            if prefix:
                 continue
 
             kept.append(d)
@@ -490,13 +429,9 @@ def scan_project(
         dirnames[:] = kept
 
         for filename in filenames:
-            if stop_event and stop_event.is_set():
-                break
-
             path = current / filename
             seen += 1
-
-            status, reason = classify_path(path, root, output_dir, cfg, matcher)
+            status, reason = classify_file(path, root, output_dir, cfg, matcher)
             rel = path.relative_to(root)
             size = 0
             lines = 0
@@ -521,15 +456,14 @@ def scan_project(
                 path=normalize_rel(rel),
                 status=status,
                 reason=reason,
-                extension=path.suffix.lower() or "(none)",
                 size_bytes=size,
                 lines=lines,
                 group=top_group(rel),
                 sha256=sha,
             ))
 
-            if seen % 250 == 0:
-                emit(f"Scanned {seen:,} files...")
+            if seen % 300 == 0:
+                emit(f"Scanning... {seen:,} files")
 
     rows.sort(key=lambda r: r.path.lower())
     return rows
@@ -568,35 +502,27 @@ def render_section(
         f"{fence}{lang}",
     ]
     result.extend(source_lines)
-    result.append(fence)
-    result.append("")
+    result += [fence, ""]
     return result
 
 
 def split_source_sections(sf: SourceFile, text: str, usable_lines: int) -> list[list[str]]:
     lines = text.splitlines()
-    rendered = render_section(sf, lines)
-    if len(rendered) <= usable_lines:
-        sf.part_count = 1
-        return [rendered]
+    section = render_section(sf, lines)
+    if len(section) <= usable_lines:
+        return [section]
 
     overhead = len(render_section(sf, [], part=(1, 999999)))
     capacity = usable_lines - overhead - 1
     if capacity < 1:
-        raise RuntimeError("Bundle line limit is too small for metadata headers.")
+        raise RuntimeError("Bundle line limit is too small.")
 
     chunks = [lines[i:i + capacity] for i in range(0, len(lines), capacity)]
     sf.part_count = len(chunks)
-    sections = []
-
-    for i, chunk in enumerate(chunks, 1):
-        section = render_section(sf, chunk, part=(i, len(chunks)))
-        while len(section) > usable_lines and chunk:
-            chunk = chunk[:-1]
-            section = render_section(sf, chunk, part=(i, len(chunks)))
-        sections.append(section)
-
-    return sections
+    return [
+        render_section(sf, chunk, part=(i, len(chunks)))
+        for i, chunk in enumerate(chunks, 1)
+    ]
 
 
 def safe_group_name(group: str) -> str:
@@ -608,6 +534,7 @@ def cleanup_generated_files(output_dir: Path) -> None:
     exact = {
         "00_PROJECT_INDEX.md",
         "01_AI_INSTRUCTIONS.md",
+        "02_CODE_MAP.md",
         "98_RECENT_CHANGES.md",
         "99_PROJECT_TREE.md",
     }
@@ -629,10 +556,10 @@ def write_bundle(path: Path, group: str, body: list[str], max_lines: int) -> Non
         f"> Hard maximum: {max_lines} lines.",
         "",
     ]
-    all_lines = prefix + body
-    if len(all_lines) > max_lines:
-        raise RuntimeError(f"{path.name} exceeded line limit: {len(all_lines)} > {max_lines}")
-    path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
+    lines = prefix + body
+    if len(lines) > max_lines:
+        raise RuntimeError(f"{path.name}: {len(lines)} lines > {max_lines}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def generate_bundles(
@@ -640,55 +567,48 @@ def generate_bundles(
     output_dir: Path,
     max_lines: int,
 ) -> list[Path]:
-    grouped: dict[str, list[tuple[SourceFile, str]]] = {}
+    groups: dict[str, list[tuple[SourceFile, str]]] = {}
     for sf, text in sources:
-        grouped.setdefault(sf.group, []).append((sf, text))
+        groups.setdefault(sf.group, []).append((sf, text))
 
-    groups = sorted(grouped, key=lambda g: (g != "ROOT", g.lower()))
+    ordered = sorted(groups, key=lambda g: (g != "ROOT", g.lower()))
     created: list[Path] = []
     ordinal = 0
-    bundle_prefix_lines = 5
-    usable = max_lines - bundle_prefix_lines
+    usable = max_lines - 5
 
-    if usable < 50:
-        raise ValueError("Maximum lines per bundle must be at least 55.")
-
-    for group in groups:
+    for group in ordered:
         ordinal += 10
-        sequence = 1
+        seq = 1
         body: list[str] = []
-        bundle_files: list[SourceFile] = []
+        current_files: list[SourceFile] = []
 
         def flush():
-            nonlocal sequence, body, bundle_files
+            nonlocal seq, body, current_files
             if not body:
                 return
-            name = f"{ordinal:02d}_{safe_group_name(group)}_{sequence:03d}.md"
-            out = output_dir / name
+            filename = f"{ordinal:02d}_{safe_group_name(group)}_{seq:03d}.md"
+            out = output_dir / filename
             write_bundle(out, group, body, max_lines)
-            for sf in bundle_files:
+            for sf in current_files:
                 if not sf.bundle:
-                    sf.bundle = name
-                elif name not in sf.bundle.split(" | "):
-                    sf.bundle += " | " + name
+                    sf.bundle = filename
+                elif filename not in sf.bundle.split(" | "):
+                    sf.bundle += " | " + filename
             created.append(out)
-            sequence += 1
+            seq += 1
             body = []
-            bundle_files = []
+            current_files = []
 
-        for sf, text in grouped[group]:
+        for sf, text in groups[group]:
             sections = split_source_sections(sf, text, usable)
-
             for section in sections:
                 if body and len(body) + len(section) > usable:
                     flush()
-
                 if len(section) > usable:
-                    raise RuntimeError(f"Section for {sf.path} cannot fit in bundle.")
-
+                    raise RuntimeError(f"Section too large: {sf.path}")
                 body.extend(section)
-                if sf not in bundle_files:
-                    bundle_files.append(sf)
+                if sf not in current_files:
+                    current_files.append(sf)
 
         flush()
 
@@ -710,47 +630,69 @@ def run_git(root: Path, args: list[str]) -> tuple[int, str]:
         return 1, str(exc)
 
 
-def git_working_tree_text(root: Path, max_lines: int) -> str:
+def git_metadata(root: Path) -> dict:
+    result = {"branch": "", "head": ""}
+    code, branch = run_git(root, ["branch", "--show-current"])
+    if code == 0:
+        result["branch"] = branch.strip()
+    code, head = run_git(root, ["rev-parse", "HEAD"])
+    if code == 0:
+        result["head"] = head.strip()
+    return result
+
+
+def git_working_tree_text(root: Path, output_dir: Path, max_lines: int) -> str:
     code, inside = run_git(root, ["rev-parse", "--is-inside-work-tree"])
     if code != 0 or "true" not in inside.lower():
         return "_Git repository not detected._\n"
 
     result: list[str] = []
+    meta = git_metadata(root)
 
-    _, branch = run_git(root, ["branch", "--show-current"])
-    result += ["## Branch", "", f"`{branch.strip() or '(detached HEAD)'}`", ""]
+    result += ["## Branch", "", f"`{meta.get('branch') or '(detached HEAD)'}`", ""]
+    result += ["## HEAD", "", f"`{meta.get('head') or '(unknown)'}`", ""]
 
     _, status = run_git(root, ["status", "--short"])
-    result += ["## Git status", "", "```text", status.strip() or "(clean)", "```", ""]
+
+    # Filter the generator's own output from status.
+    filtered_status = []
+    try:
+        rel_output = output_dir.resolve().relative_to(root.resolve()).as_posix().rstrip("/") + "/"
+    except ValueError:
+        rel_output = ""
+
+    for line in status.splitlines():
+        candidate = line[3:].strip().replace("\\", "/") if len(line) >= 4 else line.strip()
+        if rel_output and (candidate == rel_output.rstrip("/") or candidate.startswith(rel_output)):
+            continue
+        filtered_status.append(line)
+
+    result += ["## Git status", "", "```text", "\n".join(filtered_status).strip() or "(clean)", "```", ""]
 
     _, diff = run_git(root, ["diff", "--no-ext-diff", "--unified=3"])
-    diff_lines = diff.splitlines()
-    truncated = len(diff_lines) > max_lines
-    diff_lines = diff_lines[:max_lines]
+    diff_lines = diff.splitlines()[:max_lines]
     result += ["## Unstaged diff", "", "```diff"]
     result.extend(diff_lines or ["# no unstaged diff"])
-    result.append("```")
-    if truncated:
-        result += ["", f"> Diff truncated to {max_lines} lines."]
-    result.append("")
+    result += ["```", ""]
 
     _, staged = run_git(root, ["diff", "--cached", "--no-ext-diff", "--unified=3"])
-    staged_lines = staged.splitlines()
-    truncated2 = len(staged_lines) > max_lines
-    staged_lines = staged_lines[:max_lines]
+    staged_lines = staged.splitlines()[:max_lines]
     result += ["## Staged diff", "", "```diff"]
     result.extend(staged_lines or ["# no staged diff"])
-    result.append("```")
-    if truncated2:
-        result += ["", f"> Staged diff truncated to {max_lines} lines."]
-    result.append("")
+    result += ["```", ""]
 
     return "\n".join(result)
 
 
 def load_previous_manifest(output_dir: Path) -> dict:
     path = output_dir / MANIFEST_FILENAME
-    return safe_json_load(path) if path.exists() else {}
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 
 
 def compare_manifests(previous: dict, files: list[SourceFile]) -> tuple[list[str], list[str], list[str]]:
@@ -760,37 +702,36 @@ def compare_manifests(previous: dict, files: list[SourceFile]) -> tuple[list[str
         if isinstance(item, dict) and item.get("path")
     }
     new = {f.path: f.sha256 for f in files}
-
     added = sorted(set(new) - set(old))
     removed = sorted(set(old) - set(new))
     modified = sorted(p for p in set(new) & set(old) if new[p] != old[p])
     return added, modified, removed
 
 
-def build_project_tree(paths: list[str]) -> str:
+def build_tree(paths: list[str]) -> str:
     tree: dict = {}
     for path in paths:
         node = tree
         for part in path.split("/"):
             node = node.setdefault(part, {})
 
-    lines: list[str] = []
+    out: list[str] = []
 
     def walk(node: dict, prefix: str = ""):
         items = sorted(node.items(), key=lambda kv: (not bool(kv[1]), kv[0].lower()))
-        for index, (name, child) in enumerate(items):
-            last = index == len(items) - 1
-            lines.append(prefix + ("└── " if last else "├── ") + name)
+        for i, (name, child) in enumerate(items):
+            last = i == len(items) - 1
+            out.append(prefix + ("└── " if last else "├── ") + name)
             if child:
                 walk(child, prefix + ("    " if last else "│   "))
 
     walk(tree)
-    return "\n".join(lines)
+    return "\n".join(out)
 
 
 def write_support_files(
     output_dir: Path,
-    project_root: Path,
+    root: Path,
     files: list[SourceFile],
     bundles: list[Path],
     cfg: dict,
@@ -798,48 +739,44 @@ def write_support_files(
     modified: list[str],
     removed: list[str],
 ) -> None:
-    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
     total_lines = sum(f.lines for f in files)
     total_bytes = sum(f.bytes for f in files)
     estimated_tokens = max(1, total_bytes // 4)
+    git = git_metadata(root)
 
-    ai_instructions = [
-        f"# {APP_NAME} — AI Instructions",
-        "",
-        "This directory is a generated textual snapshot of a software project.",
-        "",
-        "## How to use these sources",
-        "",
-        "1. Search `00_PROJECT_INDEX.md` first when the exact source path is unknown.",
-        "2. Open only the bundle(s) listed for the relevant source file.",
-        "3. `98_RECENT_CHANGES.md` is the preferred source when reviewing the user's newest local edits.",
-        "4. Every code proposal must mention the exact original source path.",
-        "5. Prefer minimal, scoped changes. Do not refactor unrelated code.",
-        "6. When telling the user what to edit, provide an exact BEFORE block and AFTER block whenever practical.",
-        "7. Do not treat generated bundle paths as real source paths. Use the path shown after `FROM:`.",
-        "",
-        f"- Project root at export time: `{project_root}`",
-        f"- Generated: `{generated_at}`",
-        f"- Source files: **{len(files)}**",
-        f"- Source lines: **{total_lines:,}**",
-        f"- Approximate raw-text tokens: **{estimated_tokens:,}**",
-        "",
+    common_header = [
+        f"- Project: `{root}`",
+        f"- Generated: `{now}`",
+        f"- Git branch: `{git.get('branch') or '(not available)'}`",
+        f"- Git HEAD: `{git.get('head') or '(not available)'}`",
     ]
-    (output_dir / "01_AI_INSTRUCTIONS.md").write_text(
-        "\n".join(ai_instructions) + "\n",
-        encoding="utf-8",
-    )
 
     index = [
         f"# {APP_NAME} — Project Index",
         "",
-        f"- Project: `{project_root}`",
-        f"- Generated: `{generated_at}`",
+        *common_header,
         f"- Exported source files: **{len(files)}**",
         f"- Source lines: **{total_lines:,}**",
         f"- Source bytes: **{total_bytes:,}**",
         f"- Bundles: **{len(bundles)}**",
         f"- Approximate raw-text tokens: **{estimated_tokens:,}**",
+        "",
+        "## Source folders",
+        "",
+        "| Folder | Files | Lines |",
+        "|---|---:|---:|",
+    ]
+
+    folder_stats: dict[str, tuple[int, int]] = {}
+    for f in files:
+        count, lines = folder_stats.get(f.group, (0, 0))
+        folder_stats[f.group] = (count + 1, lines + f.lines)
+
+    for group, (count, lines) in sorted(folder_stats.items(), key=lambda kv: kv[0].lower()):
+        index.append(f"| `{group}` | {count:,} | {lines:,} |")
+
+    index += [
         "",
         "## Changes since previous snapshot",
         "",
@@ -847,16 +784,6 @@ def write_support_files(
         f"- Modified: **{len(modified)}**",
         f"- Removed: **{len(removed)}**",
         "",
-    ]
-
-    if added:
-        index += ["### Added", ""] + [f"- `{p}`" for p in added] + [""]
-    if modified:
-        index += ["### Modified", ""] + [f"- `{p}`" for p in modified] + [""]
-    if removed:
-        index += ["### Removed", ""] + [f"- `{p}`" for p in removed] + [""]
-
-    index += [
         "## Source map",
         "",
         "| Original source path | Bundle | Lines | Bytes | SHA256 |",
@@ -868,28 +795,59 @@ def write_support_files(
             f"| `{f.path}` | `{f.bundle}` | {f.lines} | {f.bytes:,} | `{f.sha256[:16]}` |"
         )
 
-    (output_dir / "00_PROJECT_INDEX.md").write_text(
-        "\n".join(index) + "\n",
-        encoding="utf-8",
-    )
+    (output_dir / "00_PROJECT_INDEX.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+
+    instructions = [
+        f"# {APP_NAME} — AI Instructions",
+        "",
+        "This folder is a generated textual snapshot of a software project.",
+        "",
+        "1. Use `00_PROJECT_INDEX.md` to locate the real source path and bundle.",
+        "2. Use `02_CODE_MAP.md` for a compact map of the included source files.",
+        "3. Use `98_RECENT_CHANGES.md` first when reviewing the user's latest edits.",
+        "4. Always reference the original path after `FROM:` — never the generated bundle path.",
+        "5. Prefer minimal changes and avoid unrelated refactors.",
+        "6. When practical, answer with exact BEFORE and AFTER code blocks.",
+        "",
+        *common_header,
+        "",
+    ]
+    (output_dir / "01_AI_INSTRUCTIONS.md").write_text("\n".join(instructions), encoding="utf-8")
+
+    code_map = [
+        f"# {APP_NAME} — Code Map",
+        "",
+        *common_header,
+        "",
+    ]
+    by_group: dict[str, list[str]] = {}
+    for f in files:
+        by_group.setdefault(f.group, []).append(f.path)
+
+    for group in sorted(by_group, key=str.lower):
+        code_map += [f"## {group}", ""]
+        for path in sorted(by_group[group], key=str.lower):
+            code_map.append(f"- `{path}`")
+        code_map.append("")
+
+    (output_dir / "02_CODE_MAP.md").write_text("\n".join(code_map), encoding="utf-8")
 
     tree = [
         f"# {APP_NAME} — Project Tree",
         "",
-        "> This tree contains only files included in the generated Bible.",
+        *common_header,
         "",
         "```text",
-        build_project_tree([f.path for f in files]),
+        build_tree([f.path for f in files]),
         "```",
         "",
     ]
-    (output_dir / "99_PROJECT_TREE.md").write_text(
-        "\n".join(tree),
-        encoding="utf-8",
-    )
+    (output_dir / "99_PROJECT_TREE.md").write_text("\n".join(tree), encoding="utf-8")
 
     recent = [
         f"# {APP_NAME} — Recent Changes",
+        "",
+        *common_header,
         "",
         "## Snapshot comparison",
         "",
@@ -909,21 +867,20 @@ def write_support_files(
         recent += ["---", "", "# Git working tree", ""]
         recent.append(
             git_working_tree_text(
-                project_root,
+                root,
+                output_dir,
                 int(cfg.get("git_diff_max_lines", 5000)),
             )
         )
 
-    (output_dir / "98_RECENT_CHANGES.md").write_text(
-        "\n".join(recent) + "\n",
-        encoding="utf-8",
-    )
+    (output_dir / "98_RECENT_CHANGES.md").write_text("\n".join(recent) + "\n", encoding="utf-8")
 
     manifest = {
         "app": APP_NAME,
         "version": APP_VERSION,
-        "generated_at": generated_at,
-        "project_root": str(project_root),
+        "project_root": str(root),
+        "generated_at": now,
+        "git": git,
         "config": cfg,
         "bundles": [p.name for p in bundles],
         "files": [asdict(f) for f in files],
@@ -934,102 +891,118 @@ def write_support_files(
     )
 
 
+def validate_scan(cfg: dict, rows: list[ScanRow]) -> list[str]:
+    warnings: list[str] = []
+    included = [r for r in rows if r.status == "Included"]
+    selected = list(cfg.get("selected_roots", []))
+
+    counts: dict[str, int] = {}
+    for row in included:
+        counts[row.group] = counts.get(row.group, 0) + 1
+
+    for folder in selected:
+        if counts.get(folder, 0) == 0:
+            warnings.append(f'Selected folder "{folder}" has 0 included files.')
+
+    if not included:
+        warnings.append("No source files are included.")
+
+    return warnings
+
+
 def export_project(
-    project_root: Path,
+    root: Path,
     output_dir: Path,
     cfg: dict,
-    scan_rows: Optional[list[ScanRow]] = None,
     progress=None,
 ) -> ExportResult:
-    project_root = project_root.expanduser().resolve()
+    root = root.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
 
-    if not project_root.is_dir():
-        raise ValueError(f"Invalid project folder: {project_root}")
+    if not root.is_dir():
+        raise ValueError(f"Invalid project folder: {root}")
 
     max_lines = int(cfg.get("max_lines_per_bundle", DEFAULT_MAX_LINES))
     if max_lines < 55:
-        raise ValueError("Maximum lines per bundle must be at least 55.")
+        raise ValueError("Max lines per bundle must be at least 55.")
 
-    def emit(message: str):
+    def emit(msg: str):
         if progress:
-            progress(message)
+            progress(msg)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # ALWAYS rescan using the current settings.
+    emit("Scanning project with current settings...")
+    rows = scan_project(root, output_dir, cfg, progress=emit)
+
+    warnings = validate_scan(cfg, rows)
+    for warning in warnings:
+        emit(f"WARNING: {warning}")
+
+    included_rows = [r for r in rows if r.status == "Included"]
+    if not included_rows:
+        raise RuntimeError("Nothing to export. Review folders/ignore rules.")
+
     previous = load_previous_manifest(output_dir)
-
-    if scan_rows is None:
-        emit("Scanning project...")
-        scan_rows = scan_project(project_root, output_dir, cfg, progress=emit)
-
-    included_rows = [r for r in scan_rows if r.status == "Included"]
-    emit(f"Included files: {len(included_rows):,}")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     sources: list[tuple[SourceFile, str]] = []
-    for index, row in enumerate(included_rows, 1):
-        path = project_root / Path(row.path)
-        try:
-            data = path.read_bytes()
-            text, _ = read_text_file(path)
-            sf = SourceFile(
-                path=row.path,
-                absolute_path=str(path),
-                group=row.group,
-                sha256=sha256_bytes(data),
-                lines=count_lines(text),
-                bytes=len(data),
-            )
-            sources.append((sf, text))
-        except Exception as exc:
-            emit(f"Skipped during export: {row.path} ({exc})")
-
-        if index % 250 == 0:
-            emit(f"Prepared {index:,}/{len(included_rows):,} files...")
+    for i, row in enumerate(included_rows, 1):
+        path = root / Path(row.path)
+        data = path.read_bytes()
+        text, _ = read_text_file(path)
+        sf = SourceFile(
+            path=row.path,
+            absolute_path=str(path),
+            group=row.group,
+            sha256=sha256_bytes(data),
+            lines=count_lines(text),
+            bytes=len(data),
+        )
+        sources.append((sf, text))
+        if i % 250 == 0:
+            emit(f"Preparing sources... {i:,}/{len(included_rows):,}")
 
     files = [sf for sf, _ in sources]
     added, modified, removed = compare_manifests(previous, files)
 
-    emit("Cleaning previous generated bundles...")
+    emit("Cleaning previous generated files...")
     cleanup_generated_files(output_dir)
 
     emit("Generating Markdown bundles...")
     bundles = generate_bundles(sources, output_dir, max_lines)
 
-    emit("Writing index/tree/change files...")
+    emit("Writing index, code map, tree and recent changes...")
     write_support_files(
-        output_dir,
-        project_root,
-        files,
-        bundles,
-        cfg,
-        added,
-        modified,
-        removed,
+        output_dir, root, files, bundles, cfg, added, modified, removed
     )
+
+    folder_counts: dict[str, int] = {}
+    for f in files:
+        folder_counts[f.group] = folder_counts.get(f.group, 0) + 1
 
     total_lines = sum(f.lines for f in files)
     total_bytes = sum(f.bytes for f in files)
-    estimated_tokens = max(1, total_bytes // 4)
 
-    emit("Done.")
+    emit("Project Bible generated.")
 
     return ExportResult(
-        scanned=len(scan_rows),
+        scanned=len(rows),
         exported=len(files),
-        ignored=len([r for r in scan_rows if r.status == "Ignored"]),
+        ignored=len([r for r in rows if r.status == "Ignored"]),
         source_lines=total_lines,
-        estimated_tokens=estimated_tokens,
+        estimated_tokens=max(1, total_bytes // 4),
         bundles=len(bundles),
         output_dir=str(output_dir),
         added=len(added),
         modified=len(modified),
         removed=len(removed),
+        folder_counts=folder_counts,
     )
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # GUI
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 def launch_gui() -> None:
     import tkinter as tk
@@ -1039,80 +1012,32 @@ def launch_gui() -> None:
         def __init__(self):
             super().__init__()
             self.title(f"{APP_NAME} v{APP_VERSION}")
-            self.geometry("1180x790")
-            self.minsize(980, 680)
-
-            self.scan_rows: list[ScanRow] = []
-            self.scan_thread: Optional[threading.Thread] = None
-            self.export_thread: Optional[threading.Thread] = None
-            self.stop_event = threading.Event()
-            self.ui_queue: queue.Queue = queue.Queue()
+            self.geometry("1180x780")
+            self.minsize(1000, 680)
 
             self.project_var = tk.StringVar()
             self.output_var = tk.StringVar()
-            self.preset_var = tk.StringVar(value="Default")
             self.max_lines_var = tk.StringVar(value=str(DEFAULT_MAX_LINES))
-            self.max_file_mb_var = tk.StringVar(value=str(DEFAULT_MAX_SOURCE_MB))
-            self.root_files_var = tk.BooleanVar(value=True)
+            self.max_mb_var = tk.StringVar(value=str(DEFAULT_MAX_SOURCE_MB))
             self.gitignore_var = tk.BooleanVar(value=True)
+            self.root_files_var = tk.BooleanVar(value=True)
             self.gitdiff_var = tk.BooleanVar(value=True)
             self.gitdiff_lines_var = tk.StringVar(value="5000")
 
-            self.preview_search_var = tk.StringVar()
-            self.preview_mode_var = tk.StringVar(value="All")
-
-            self.stats_var = tk.StringVar(value="No scan yet.")
+            self.search_var = tk.StringVar()
+            self.view_mode_var = tk.StringVar(value="All")
+            self.stats_var = tk.StringVar(value="Choose a project, then click Scan.")
             self.status_var = tk.StringVar(value="Ready.")
 
-            self._build_ui()
-            self.after(100, self._process_ui_queue)
+            self.folder_vars: dict[str, tk.BooleanVar] = {}
+            self.scan_rows: list[ScanRow] = []
+            self.ui_queue: queue.Queue = queue.Queue()
+            self.busy = False
 
-        # ------------------------ UI construction ------------------------
+            self._build()
+            self.after(100, self._process_queue)
 
-        def _build_ui(self):
-            self._configure_style()
-
-            header = ttk.Frame(self, padding=(16, 12, 16, 8))
-            header.pack(fill="x")
-
-            ttk.Label(
-                header,
-                text=APP_NAME,
-                style="Title.TLabel",
-            ).pack(anchor="w")
-            ttk.Label(
-                header,
-                text="Turn any project into an AI-readable code bible.",
-                style="Subtitle.TLabel",
-            ).pack(anchor="w")
-
-            self.notebook = ttk.Notebook(self)
-            self.notebook.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-
-            self.tab_project = ttk.Frame(self.notebook, padding=14)
-            self.tab_include = ttk.Frame(self.notebook, padding=14)
-            self.tab_ignore = ttk.Frame(self.notebook, padding=14)
-            self.tab_preview = ttk.Frame(self.notebook, padding=14)
-            self.tab_generate = ttk.Frame(self.notebook, padding=14)
-
-            self.notebook.add(self.tab_project, text="1. Project")
-            self.notebook.add(self.tab_include, text="2. Include")
-            self.notebook.add(self.tab_ignore, text="3. Ignore")
-            self.notebook.add(self.tab_preview, text="4. Preview")
-            self.notebook.add(self.tab_generate, text="5. Generate")
-
-            self._build_project_tab()
-            self._build_include_tab()
-            self._build_ignore_tab()
-            self._build_preview_tab()
-            self._build_generate_tab()
-
-            bottom = ttk.Frame(self, padding=(14, 0, 14, 10))
-            bottom.pack(fill="x")
-            ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
-            ttk.Button(bottom, text="Save Project Config", command=self.save_project_config).pack(side="right")
-
-        def _configure_style(self):
+        def _style(self):
             style = ttk.Style(self)
             try:
                 if sys.platform.startswith("win"):
@@ -1122,288 +1047,237 @@ def launch_gui() -> None:
             style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
             style.configure("Subtitle.TLabel", font=("Segoe UI", 10))
             style.configure("Section.TLabel", font=("Segoe UI", 11, "bold"))
-            style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=8)
+            style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=7)
 
-        def _build_project_tab(self):
-            f = self.tab_project
+        def _build(self):
+            self._style()
 
-            ttk.Label(f, text="Project folders", style="Section.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-
-            ttk.Label(f, text="Source project:").grid(row=1, column=0, sticky="w", pady=5)
-            ttk.Entry(f, textvariable=self.project_var).grid(row=1, column=1, sticky="ew", padx=8, pady=5)
-            ttk.Button(f, text="Browse...", command=self.choose_project).grid(row=1, column=2, pady=5)
-
-            ttk.Label(f, text="Bible output:").grid(row=2, column=0, sticky="w", pady=5)
-            ttk.Entry(f, textvariable=self.output_var).grid(row=2, column=1, sticky="ew", padx=8, pady=5)
-            ttk.Button(f, text="Browse...", command=self.choose_output).grid(row=2, column=2, pady=5)
-
-            ttk.Separator(f).grid(row=3, column=0, columnspan=3, sticky="ew", pady=14)
-
-            ttk.Label(f, text="Preset", style="Section.TLabel").grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 6))
-            ttk.Label(f, text="Preset:").grid(row=5, column=0, sticky="w", pady=5)
-
-            preset = ttk.Combobox(
-                f,
-                textvariable=self.preset_var,
-                state="readonly",
-                values=["Default", "Tibia Idle (Canary + Client)"],
-                width=34,
-            )
-            preset.grid(row=5, column=1, sticky="w", padx=8, pady=5)
-            preset.bind("<<ComboboxSelected>>", lambda _e: self.apply_preset())
-
-            ttk.Button(f, text="Apply preset", command=self.apply_preset).grid(row=5, column=2, pady=5)
-
-            ttk.Separator(f).grid(row=6, column=0, columnspan=3, sticky="ew", pady=14)
-
-            ttk.Label(f, text="Generation limits", style="Section.TLabel").grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
-
-            limits = ttk.Frame(f)
-            limits.grid(row=8, column=0, columnspan=3, sticky="w", pady=4)
-
-            ttk.Label(limits, text="Max lines per bundle:").pack(side="left")
-            ttk.Spinbox(limits, from_=55, to=1000000, textvariable=self.max_lines_var, width=10).pack(side="left", padx=(6, 24))
-
-            ttk.Label(limits, text="Max source file size (MB):").pack(side="left")
-            ttk.Spinbox(limits, from_=0.1, to=1000, increment=0.1, textvariable=self.max_file_mb_var, width=9).pack(side="left", padx=(6, 24))
-
-            ttk.Label(limits, text="Git diff max lines:").pack(side="left")
-            ttk.Spinbox(limits, from_=0, to=1000000, textvariable=self.gitdiff_lines_var, width=9).pack(side="left", padx=6)
-
-            options = ttk.LabelFrame(f, text="Options", padding=10)
-            options.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(14, 4))
-
-            ttk.Checkbutton(options, text="Include files stored directly in project root", variable=self.root_files_var).pack(anchor="w")
-            ttk.Checkbutton(options, text="Respect .gitignore", variable=self.gitignore_var).pack(anchor="w", pady=3)
-            ttk.Checkbutton(options, text="Generate Git status + local diff in 98_RECENT_CHANGES.md", variable=self.gitdiff_var).pack(anchor="w")
-
-            tip = (
-                "Recommended for Tibia Idle: choose the Tibia Idle preset, then scan the project. "
-                "The Preview tab lets you verify exactly what will and will not enter the Bible before generating it."
-            )
-            ttk.Label(f, text=tip, wraplength=850).grid(row=10, column=0, columnspan=3, sticky="w", pady=(18, 0))
-
-            f.columnconfigure(1, weight=1)
-
-        def _build_include_tab(self):
-            f = self.tab_include
-            f.columnconfigure(0, weight=1)
-            f.columnconfigure(1, weight=1)
-            f.rowconfigure(1, weight=1)
-
-            ttk.Label(f, text="Top-level folders", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(f, text="File extensions", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(16, 0))
-
-            left = ttk.Frame(f)
-            left.grid(row=1, column=0, sticky="nsew", pady=(6, 8))
-            left.rowconfigure(0, weight=1)
-            left.columnconfigure(0, weight=1)
-
-            self.roots_list = tk.Listbox(left, selectmode=tk.EXTENDED, exportselection=False)
-            roots_scroll = ttk.Scrollbar(left, orient="vertical", command=self.roots_list.yview)
-            self.roots_list.configure(yscrollcommand=roots_scroll.set)
-            self.roots_list.grid(row=0, column=0, sticky="nsew")
-            roots_scroll.grid(row=0, column=1, sticky="ns")
-
-            root_buttons = ttk.Frame(left)
-            root_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            ttk.Button(root_buttons, text="Select all", command=lambda: self.roots_list.select_set(0, "end")).pack(side="left")
-            ttk.Button(root_buttons, text="Clear", command=lambda: self.roots_list.selection_clear(0, "end")).pack(side="left", padx=6)
-            ttk.Button(root_buttons, text="Canary + Client", command=self.select_tibia_roots).pack(side="left")
-
-            right = ttk.Frame(f)
-            right.grid(row=1, column=1, sticky="nsew", padx=(16, 0), pady=(6, 8))
-            right.rowconfigure(0, weight=1)
-            right.columnconfigure(0, weight=1)
-
-            self.extensions_list = tk.Listbox(right, selectmode=tk.EXTENDED, exportselection=False)
-            ext_scroll = ttk.Scrollbar(right, orient="vertical", command=self.extensions_list.yview)
-            self.extensions_list.configure(yscrollcommand=ext_scroll.set)
-            self.extensions_list.grid(row=0, column=0, sticky="nsew")
-            ext_scroll.grid(row=0, column=1, sticky="ns")
-
-            for ext in sorted(DEFAULT_EXTENSIONS):
-                self.extensions_list.insert("end", ext)
-            self.extensions_list.select_set(0, "end")
-
-            ext_buttons = ttk.Frame(right)
-            ext_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            ttk.Button(ext_buttons, text="Select all", command=lambda: self.extensions_list.select_set(0, "end")).pack(side="left")
-            ttk.Button(ext_buttons, text="Clear", command=lambda: self.extensions_list.selection_clear(0, "end")).pack(side="left", padx=6)
-            ttk.Button(ext_buttons, text="Code essentials", command=self.select_code_essentials).pack(side="left")
-
-            ttk.Label(f, text="Special filenames (one per line)", style="Section.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 4))
-            self.special_text = tk.Text(f, height=7, wrap="none")
-            self.special_text.grid(row=3, column=0, columnspan=2, sticky="ew")
-            self._set_text_lines(self.special_text, DEFAULT_SPECIAL_FILENAMES)
-
-        def _build_ignore_tab(self):
-            f = self.tab_ignore
-            f.columnconfigure(0, weight=1)
-            f.columnconfigure(1, weight=1)
-            f.rowconfigure(1, weight=1)
-
-            ttk.Label(f, text="Ignored directory names", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(f, text="Ignored file/path patterns", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(16, 0))
-
-            self.ignore_dirs_text = tk.Text(f, wrap="none")
-            self.ignore_dirs_text.grid(row=1, column=0, sticky="nsew", pady=(6, 8))
-
-            self.ignore_globs_text = tk.Text(f, wrap="none")
-            self.ignore_globs_text.grid(row=1, column=1, sticky="nsew", padx=(16, 0), pady=(6, 8))
-
-            self._set_text_lines(self.ignore_dirs_text, DEFAULT_IGNORE_DIRS)
-            self._set_text_lines(self.ignore_globs_text, DEFAULT_IGNORE_GLOBS)
-
+            header = ttk.Frame(self, padding=(16, 12, 16, 8))
+            header.pack(fill="x")
+            ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
             ttk.Label(
-                f,
-                text="Directory names apply anywhere in the tree. Example: bin",
-            ).grid(row=2, column=0, sticky="w")
-            ttk.Label(
-                f,
-                text="Patterns use glob syntax. Examples: *.png  or  data/cache/*",
-            ).grid(row=2, column=1, sticky="w", padx=(16, 0))
+                header,
+                text="Create a searchable AI-readable snapshot of any source project.",
+                style="Subtitle.TLabel",
+            ).pack(anchor="w")
 
-            ttk.Label(f, text="Excluded relative paths / prefixes", style="Section.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(14, 4))
-            self.exclude_paths_text = tk.Text(f, height=7, wrap="none")
-            self.exclude_paths_text.grid(row=4, column=0, columnspan=2, sticky="ew")
-            ttk.Label(
-                f,
-                text="One per line. Example: Canary/docs  or  Client/data/things. Everything under that path is skipped.",
-            ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 8))
+            notebook = ttk.Notebook(self)
+            notebook.pack(fill="both", expand=True, padx=14, pady=(0, 8))
 
-            actions = ttk.Frame(f)
-            actions.grid(row=6, column=0, columnspan=2, sticky="w")
-            ttk.Button(actions, text="Restore defaults", command=self.restore_ignore_defaults).pack(side="left")
-            ttk.Button(actions, text="Tibia Idle ignore preset", command=self.apply_tibia_ignore_defaults).pack(side="left", padx=8)
+            self.main_tab = ttk.Frame(notebook, padding=14)
+            self.advanced_tab = ttk.Frame(notebook, padding=14)
+            notebook.add(self.main_tab, text="Project Bible")
+            notebook.add(self.advanced_tab, text="Advanced Settings")
 
-        def _build_preview_tab(self):
-            f = self.tab_preview
-            f.columnconfigure(0, weight=1)
-            f.rowconfigure(2, weight=1)
+            self._build_main()
+            self._build_advanced()
 
-            controls = ttk.Frame(f)
-            controls.grid(row=0, column=0, sticky="ew")
-            controls.columnconfigure(1, weight=1)
+            footer = ttk.Frame(self, padding=(14, 0, 14, 10))
+            footer.pack(fill="x")
+            ttk.Label(footer, textvariable=self.status_var).pack(side="left")
+            ttk.Button(footer, text="Save settings for this project", command=self.save_settings).pack(side="right")
 
-            ttk.Button(controls, text="SCAN PROJECT", style="Big.TButton", command=self.start_scan).grid(row=0, column=0, padx=(0, 12))
-            ttk.Entry(controls, textvariable=self.preview_search_var).grid(row=0, column=1, sticky="ew")
-            ttk.Label(controls, text="Show:").grid(row=0, column=2, padx=(12, 4))
-            mode = ttk.Combobox(
-                controls,
-                textvariable=self.preview_mode_var,
-                state="readonly",
-                width=11,
-                values=["All", "Included", "Ignored"],
-            )
-            mode.grid(row=0, column=3)
-            mode.bind("<<ComboboxSelected>>", lambda _e: self.refresh_preview())
-            self.preview_search_var.trace_add("write", lambda *_: self.refresh_preview())
-
-            ttk.Label(f, textvariable=self.stats_var).grid(row=1, column=0, sticky="w", pady=(10, 6))
-
-            table_frame = ttk.Frame(f)
-            table_frame.grid(row=2, column=0, sticky="nsew")
-            table_frame.rowconfigure(0, weight=1)
-            table_frame.columnconfigure(0, weight=1)
-
-            cols = ("status", "path", "reason", "lines", "size")
-            self.preview_tree = ttk.Treeview(table_frame, columns=cols, show="headings")
-            self.preview_tree.heading("status", text="Status")
-            self.preview_tree.heading("path", text="Original source path")
-            self.preview_tree.heading("reason", text="Reason")
-            self.preview_tree.heading("lines", text="Lines")
-            self.preview_tree.heading("size", text="Size")
-
-            self.preview_tree.column("status", width=85, stretch=False)
-            self.preview_tree.column("path", width=480)
-            self.preview_tree.column("reason", width=250)
-            self.preview_tree.column("lines", width=80, anchor="e", stretch=False)
-            self.preview_tree.column("size", width=90, anchor="e", stretch=False)
-
-            y = ttk.Scrollbar(table_frame, orient="vertical", command=self.preview_tree.yview)
-            x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.preview_tree.xview)
-            self.preview_tree.configure(yscrollcommand=y.set, xscrollcommand=x.set)
-
-            self.preview_tree.grid(row=0, column=0, sticky="nsew")
-            y.grid(row=0, column=1, sticky="ns")
-            x.grid(row=1, column=0, sticky="ew")
-
-        def _build_generate_tab(self):
-            f = self.tab_generate
+        def _build_main(self):
+            f = self.main_tab
             f.columnconfigure(0, weight=1)
             f.rowconfigure(3, weight=1)
 
-            ttk.Label(f, text="Generate the Project Bible", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+            project_box = ttk.LabelFrame(f, text="Project", padding=10)
+            project_box.grid(row=0, column=0, sticky="ew")
+            project_box.columnconfigure(1, weight=1)
 
-            description = (
-                "Generation uses the same settings shown in the other tabs. "
-                "If you scanned the project first, the preview snapshot is reused."
+            ttk.Label(project_box, text="Source folder:").grid(row=0, column=0, sticky="w", pady=4)
+            ttk.Entry(project_box, textvariable=self.project_var).grid(row=0, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Button(project_box, text="Browse...", command=self.choose_project).grid(row=0, column=2, pady=4)
+
+            ttk.Label(project_box, text="Output folder:").grid(row=1, column=0, sticky="w", pady=4)
+            ttk.Entry(project_box, textvariable=self.output_var).grid(row=1, column=1, sticky="ew", padx=8, pady=4)
+            ttk.Button(project_box, text="Browse...", command=self.choose_output).grid(row=1, column=2, pady=4)
+
+            options_row = ttk.Frame(project_box)
+            options_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            ttk.Label(options_row, text="Max lines per bundle:").pack(side="left")
+            ttk.Spinbox(options_row, from_=55, to=1000000, textvariable=self.max_lines_var, width=9).pack(side="left", padx=(6, 18))
+            ttk.Checkbutton(options_row, text="Respect .gitignore", variable=self.gitignore_var).pack(side="left")
+
+            folder_box = ttk.LabelFrame(f, text="Folders to include", padding=10)
+            folder_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            folder_box.columnconfigure(0, weight=1)
+
+            ttk.Label(
+                folder_box,
+                text="Check the project folders that should enter the Bible. Root files are controlled in Advanced Settings.",
+            ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+            folder_host = ttk.Frame(folder_box)
+            folder_host.grid(row=1, column=0, sticky="ew")
+            folder_host.columnconfigure(0, weight=1)
+
+            self.folder_canvas = tk.Canvas(folder_host, height=120, highlightthickness=1, highlightbackground="#c8c8c8")
+            folder_scroll = ttk.Scrollbar(folder_host, orient="vertical", command=self.folder_canvas.yview)
+            self.folder_canvas.configure(yscrollcommand=folder_scroll.set)
+            self.folder_canvas.grid(row=0, column=0, sticky="ew")
+            folder_scroll.grid(row=0, column=1, sticky="ns")
+
+            self.folder_inner = ttk.Frame(self.folder_canvas)
+            self.folder_window = self.folder_canvas.create_window((0, 0), window=self.folder_inner, anchor="nw")
+            self.folder_inner.bind("<Configure>", self._folder_scrollregion)
+            self.folder_canvas.bind("<Configure>", self._folder_width)
+
+            folder_buttons = ttk.Frame(folder_box)
+            folder_buttons.grid(row=2, column=0, sticky="w", pady=(7, 0))
+            ttk.Button(folder_buttons, text="Select all", command=self.select_all_folders).pack(side="left")
+            ttk.Button(folder_buttons, text="Clear", command=self.clear_folders).pack(side="left", padx=6)
+
+            action_bar = ttk.Frame(f)
+            action_bar.grid(row=2, column=0, sticky="ew", pady=10)
+
+            self.scan_btn = ttk.Button(action_bar, text="SCAN PROJECT", style="Primary.TButton", command=self.start_scan)
+            self.scan_btn.pack(side="left")
+            self.generate_btn = ttk.Button(action_bar, text="GENERATE BIBLE", style="Primary.TButton", command=self.start_generate)
+            self.generate_btn.pack(side="left", padx=8)
+            ttk.Button(action_bar, text="Open output", command=self.open_output).pack(side="left")
+
+            ttk.Label(action_bar, textvariable=self.stats_var).pack(side="right")
+
+            preview_box = ttk.LabelFrame(f, text="Preview", padding=8)
+            preview_box.grid(row=3, column=0, sticky="nsew")
+            preview_box.columnconfigure(0, weight=1)
+            preview_box.rowconfigure(1, weight=1)
+
+            filters = ttk.Frame(preview_box)
+            filters.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            filters.columnconfigure(1, weight=1)
+            ttk.Label(filters, text="Search:").grid(row=0, column=0, sticky="w")
+            ttk.Entry(filters, textvariable=self.search_var).grid(row=0, column=1, sticky="ew", padx=6)
+            ttk.Label(filters, text="Show:").grid(row=0, column=2, padx=(12, 4))
+            mode = ttk.Combobox(
+                filters,
+                textvariable=self.view_mode_var,
+                state="readonly",
+                values=["All", "Included", "Ignored"],
+                width=10,
             )
-            ttk.Label(f, text=description, wraplength=900).grid(row=1, column=0, sticky="w", pady=(4, 10))
+            mode.grid(row=0, column=3)
+            mode.bind("<<ComboboxSelected>>", lambda _e: self.refresh_preview())
+            self.search_var.trace_add("write", lambda *_: self.refresh_preview())
+
+            table_host = ttk.Frame(preview_box)
+            table_host.grid(row=1, column=0, sticky="nsew")
+            table_host.columnconfigure(0, weight=1)
+            table_host.rowconfigure(0, weight=1)
+
+            cols = ("status", "path", "reason", "lines", "size")
+            self.tree = ttk.Treeview(table_host, columns=cols, show="headings")
+            self.tree.heading("status", text="Status")
+            self.tree.heading("path", text="Original source path")
+            self.tree.heading("reason", text="Reason")
+            self.tree.heading("lines", text="Lines")
+            self.tree.heading("size", text="Size")
+
+            self.tree.column("status", width=80, stretch=False)
+            self.tree.column("path", width=520)
+            self.tree.column("reason", width=260)
+            self.tree.column("lines", width=80, anchor="e", stretch=False)
+            self.tree.column("size", width=85, anchor="e", stretch=False)
+
+            sy = ttk.Scrollbar(table_host, orient="vertical", command=self.tree.yview)
+            sx = ttk.Scrollbar(table_host, orient="horizontal", command=self.tree.xview)
+            self.tree.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+
+            self.tree.grid(row=0, column=0, sticky="nsew")
+            sy.grid(row=0, column=1, sticky="ns")
+            sx.grid(row=1, column=0, sticky="ew")
+
+        def _build_advanced(self):
+            f = self.advanced_tab
+            f.columnconfigure(0, weight=1)
+            f.columnconfigure(1, weight=1)
+            f.rowconfigure(1, weight=1)
+
+            ttk.Label(f, text="Included source extensions", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(f, text="Ignored directory names", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(14, 0))
+
+            self.extensions_text = tk.Text(f, wrap="none")
+            self.extensions_text.grid(row=1, column=0, sticky="nsew", pady=(5, 10))
+
+            self.ignore_dirs_text = tk.Text(f, wrap="none")
+            self.ignore_dirs_text.grid(row=1, column=1, sticky="nsew", padx=(14, 0), pady=(5, 10))
+
+            ttk.Label(f, text="Ignored file/path patterns", style="Section.TLabel").grid(row=2, column=0, sticky="w")
+            ttk.Label(f, text="Specific relative paths to exclude", style="Section.TLabel").grid(row=2, column=1, sticky="w", padx=(14, 0))
+
+            self.ignore_globs_text = tk.Text(f, height=12, wrap="none")
+            self.ignore_globs_text.grid(row=3, column=0, sticky="ew", pady=(5, 10))
+
+            self.exclude_paths_text = tk.Text(f, height=12, wrap="none")
+            self.exclude_paths_text.grid(row=3, column=1, sticky="ew", padx=(14, 0), pady=(5, 10))
+
+            ttk.Label(f, text="Special filenames (included even without normal extension)", style="Section.TLabel").grid(row=4, column=0, columnspan=2, sticky="w")
+            self.special_text = tk.Text(f, height=7, wrap="none")
+            self.special_text.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(5, 10))
+
+            opts = ttk.LabelFrame(f, text="Other options", padding=10)
+            opts.grid(row=6, column=0, columnspan=2, sticky="ew")
+
+            ttk.Checkbutton(opts, text="Include files directly in project root", variable=self.root_files_var).pack(side="left")
+            ttk.Checkbutton(opts, text="Include Git status and diff", variable=self.gitdiff_var).pack(side="left", padx=16)
+
+            ttk.Label(opts, text="Max source file (MB):").pack(side="left")
+            ttk.Spinbox(opts, from_=0.1, to=1000, increment=0.1, textvariable=self.max_mb_var, width=7).pack(side="left", padx=(5, 16))
+
+            ttk.Label(opts, text="Git diff max lines:").pack(side="left")
+            ttk.Spinbox(opts, from_=0, to=1000000, textvariable=self.gitdiff_lines_var, width=8).pack(side="left", padx=5)
 
             buttons = ttk.Frame(f)
-            buttons.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+            buttons.grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            ttk.Button(buttons, text="Restore recommended defaults", command=self.restore_defaults).pack(side="left")
 
-            self.generate_button = ttk.Button(
-                buttons,
-                text="GENERATE PROJECT BIBLE",
-                style="Big.TButton",
-                command=self.start_export,
-            )
-            self.generate_button.pack(side="left")
+            self.restore_defaults()
 
-            ttk.Button(buttons, text="Open output folder", command=self.open_output).pack(side="left", padx=8)
-            ttk.Button(buttons, text="Save config", command=self.save_project_config).pack(side="left")
+        def _folder_scrollregion(self, _event=None):
+            self.folder_canvas.configure(scrollregion=self.folder_canvas.bbox("all"))
 
-            log_frame = ttk.Frame(f)
-            log_frame.grid(row=3, column=0, sticky="nsew")
-            log_frame.rowconfigure(0, weight=1)
-            log_frame.columnconfigure(0, weight=1)
-
-            self.log_text = tk.Text(log_frame, wrap="word")
-            log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-            self.log_text.configure(yscrollcommand=log_scroll.set)
-            self.log_text.grid(row=0, column=0, sticky="nsew")
-            log_scroll.grid(row=0, column=1, sticky="ns")
-
-        # ------------------------ config helpers ------------------------
+        def _folder_width(self, event):
+            self.folder_canvas.itemconfigure(self.folder_window, width=event.width)
 
         @staticmethod
-        def _text_lines(widget) -> list[str]:
-            return [
-                line.strip()
-                for line in widget.get("1.0", "end").splitlines()
-                if line.strip()
-            ]
-
-        @staticmethod
-        def _set_text_lines(widget, values: Iterable[str]):
+        def _set_lines(widget, values):
             widget.delete("1.0", "end")
             widget.insert("1.0", "\n".join(values))
 
-        def selected_roots(self) -> list[str]:
-            return [self.roots_list.get(i) for i in self.roots_list.curselection()]
+        @staticmethod
+        def _get_lines(widget):
+            return [line.strip() for line in widget.get("1.0", "end").splitlines() if line.strip()]
 
-        def selected_extensions(self) -> list[str]:
-            return [self.extensions_list.get(i) for i in self.extensions_list.curselection()]
+        def restore_defaults(self):
+            self._set_lines(self.extensions_text, DEFAULT_EXTENSIONS)
+            self._set_lines(self.ignore_dirs_text, DEFAULT_IGNORE_DIRS)
+            self._set_lines(self.ignore_globs_text, DEFAULT_IGNORE_GLOBS)
+            self._set_lines(self.exclude_paths_text, [])
+            self._set_lines(self.special_text, DEFAULT_SPECIAL_FILENAMES)
+            self.max_mb_var.set(str(DEFAULT_MAX_SOURCE_MB))
+            self.root_files_var.set(True)
+            self.gitdiff_var.set(True)
+            self.gitdiff_lines_var.set("5000")
 
-        def current_config(self) -> dict:
+        def current_config(self):
             try:
                 max_lines = int(self.max_lines_var.get())
-                max_mb = float(self.max_file_mb_var.get())
+                max_mb = float(self.max_mb_var.get())
                 git_lines = int(self.gitdiff_lines_var.get())
             except ValueError as exc:
-                raise ValueError("Generation limits contain an invalid number.") from exc
+                raise ValueError("One of the numeric settings is invalid.") from exc
+
+            selected_roots = [name for name, var in self.folder_vars.items() if var.get()]
 
             return {
-                "preset": self.preset_var.get(),
-                "selected_roots": self.selected_roots(),
-                "extensions": self.selected_extensions(),
-                "special_filenames": self._text_lines(self.special_text),
-                "ignore_dirs": self._text_lines(self.ignore_dirs_text),
-                "ignore_globs": self._text_lines(self.ignore_globs_text),
-                "exclude_path_prefixes": self._text_lines(self.exclude_paths_text),
+                "selected_roots": selected_roots,
+                "extensions": self._get_lines(self.extensions_text),
+                "special_filenames": self._get_lines(self.special_text),
+                "ignore_dirs": self._get_lines(self.ignore_dirs_text),
+                "ignore_globs": self._get_lines(self.ignore_globs_text),
+                "exclude_path_prefixes": self._get_lines(self.exclude_paths_text),
                 "max_lines_per_bundle": max_lines,
                 "max_source_file_mb": max_mb,
                 "include_root_files": self.root_files_var.get(),
@@ -1412,153 +1286,94 @@ def launch_gui() -> None:
                 "git_diff_max_lines": git_lines,
             }
 
-        def apply_config_to_ui(self, cfg: dict):
-            self.preset_var.set(cfg.get("preset", "Default"))
+        def apply_config(self, cfg):
             self.max_lines_var.set(str(cfg.get("max_lines_per_bundle", DEFAULT_MAX_LINES)))
-            self.max_file_mb_var.set(str(cfg.get("max_source_file_mb", DEFAULT_MAX_SOURCE_MB)))
+            self.max_mb_var.set(str(cfg.get("max_source_file_mb", DEFAULT_MAX_SOURCE_MB)))
             self.root_files_var.set(bool(cfg.get("include_root_files", True)))
             self.gitignore_var.set(bool(cfg.get("respect_gitignore", True)))
             self.gitdiff_var.set(bool(cfg.get("include_git_diff", True)))
             self.gitdiff_lines_var.set(str(cfg.get("git_diff_max_lines", 5000)))
 
-            self._set_text_lines(self.special_text, cfg.get("special_filenames", DEFAULT_SPECIAL_FILENAMES))
-            self._set_text_lines(self.ignore_dirs_text, cfg.get("ignore_dirs", DEFAULT_IGNORE_DIRS))
-            self._set_text_lines(self.ignore_globs_text, cfg.get("ignore_globs", DEFAULT_IGNORE_GLOBS))
-            self._set_text_lines(self.exclude_paths_text, cfg.get("exclude_path_prefixes", []))
+            self._set_lines(self.extensions_text, cfg.get("extensions", DEFAULT_EXTENSIONS))
+            self._set_lines(self.special_text, cfg.get("special_filenames", DEFAULT_SPECIAL_FILENAMES))
+            self._set_lines(self.ignore_dirs_text, cfg.get("ignore_dirs", DEFAULT_IGNORE_DIRS))
+            self._set_lines(self.ignore_globs_text, cfg.get("ignore_globs", DEFAULT_IGNORE_GLOBS))
+            self._set_lines(self.exclude_paths_text, cfg.get("exclude_path_prefixes", []))
 
-            ext_set = set(cfg.get("extensions", DEFAULT_EXTENSIONS))
-            self.extensions_list.selection_clear(0, "end")
-            for i in range(self.extensions_list.size()):
-                if self.extensions_list.get(i) in ext_set:
-                    self.extensions_list.select_set(i)
-
-            roots = set(cfg.get("selected_roots", []))
-            self.roots_list.selection_clear(0, "end")
-            for i in range(self.roots_list.size()):
-                if not roots or self.roots_list.get(i) in roots:
-                    self.roots_list.select_set(i)
-
-        # ------------------------ project handling ------------------------
+            selected = set(cfg.get("selected_roots", []))
+            for name, var in self.folder_vars.items():
+                var.set(name in selected if selected else True)
 
         def choose_project(self):
-            path = filedialog.askdirectory(title="Choose source project")
+            path = filedialog.askdirectory(title="Choose project folder")
             if not path:
                 return
 
             root = Path(path)
             self.project_var.set(str(root))
             self.output_var.set(str(root / DEFAULT_OUTPUT_DIRNAME))
-            self.populate_roots(root)
-
-            cfg = load_config(root)
-            self.apply_config_to_ui(cfg)
+            self.load_folder_checkboxes(root)
+            self.apply_config(load_config(root))
             self.scan_rows = []
             self.refresh_preview()
-            self.status_var.set(f"Project loaded: {root.name}")
+            self.status_var.set(f"Loaded: {root.name}")
 
         def choose_output(self):
-            path = filedialog.askdirectory(title="Choose Bible output folder")
+            path = filedialog.askdirectory(title="Choose output folder")
             if path:
                 self.output_var.set(path)
 
-        def populate_roots(self, root: Path):
-            self.roots_list.delete(0, "end")
+        def load_folder_checkboxes(self, root: Path):
+            for child in self.folder_inner.winfo_children():
+                child.destroy()
+            self.folder_vars.clear()
+
             try:
-                dirs = sorted(
+                ignored = set(DEFAULT_IGNORE_DIRS)
+                folders = sorted(
                     [
                         p.name
                         for p in root.iterdir()
-                        if p.is_dir() and p.name not in {".git", DEFAULT_OUTPUT_DIRNAME}
+                        if p.is_dir()
+                        and p.name not in ignored
+                        and p.name != DEFAULT_OUTPUT_DIRNAME
                     ],
                     key=str.lower,
                 )
-                for name in dirs:
-                    self.roots_list.insert("end", name)
-                if dirs:
-                    self.roots_list.select_set(0, "end")
-            except Exception as exc:
-                messagebox.showerror(APP_NAME, f"Could not list folders:\n{exc}")
-
-        def save_project_config(self):
-            try:
-                root = Path(self.project_var.get())
-                if not root.is_dir():
-                    raise ValueError("Choose a valid source project first.")
-                path = save_config(root, self.current_config())
-                self.status_var.set(f"Config saved: {path.name}")
-                messagebox.showinfo(APP_NAME, f"Project configuration saved:\n{path}")
             except Exception as exc:
                 messagebox.showerror(APP_NAME, str(exc))
+                return
 
-        # ------------------------ presets ------------------------
+            columns = 4
+            for index, name in enumerate(folders):
+                var = tk.BooleanVar(value=True)
+                self.folder_vars[name] = var
+                cb = ttk.Checkbutton(self.folder_inner, text=name, variable=var)
+                cb.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 28), pady=3)
 
-        def apply_preset(self):
-            name = self.preset_var.get()
-            if name == "Tibia Idle (Canary + Client)":
-                cfg = tibia_idle_config()
-            else:
-                cfg = default_config()
-                cfg["preset"] = "Default"
-            self.apply_config_to_ui(cfg)
+            for col in range(columns):
+                self.folder_inner.columnconfigure(col, weight=1)
 
-            if name == "Tibia Idle (Canary + Client)":
-                self.select_tibia_roots()
+            self._folder_scrollregion()
 
-            self.status_var.set(f"Preset applied: {name}")
+        def select_all_folders(self):
+            for var in self.folder_vars.values():
+                var.set(True)
 
-        def select_tibia_roots(self):
-            wanted = {"Canary", "Client"}
-            self.roots_list.selection_clear(0, "end")
-            for i in range(self.roots_list.size()):
-                if self.roots_list.get(i) in wanted:
-                    self.roots_list.select_set(i)
+        def clear_folders(self):
+            for var in self.folder_vars.values():
+                var.set(False)
 
-        def select_code_essentials(self):
-            wanted = {
-                ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp",
-                ".cs", ".lua", ".otui", ".otmod",
-                ".py", ".js", ".jsx", ".ts", ".tsx",
-                ".xml", ".json", ".yaml", ".yml", ".toml", ".ini", ".sql",
-                ".md", ".txt",
-            }
-            self.extensions_list.selection_clear(0, "end")
-            for i in range(self.extensions_list.size()):
-                if self.extensions_list.get(i) in wanted:
-                    self.extensions_list.select_set(i)
-
-        def restore_ignore_defaults(self):
-            self._set_text_lines(self.ignore_dirs_text, DEFAULT_IGNORE_DIRS)
-            self._set_text_lines(self.ignore_globs_text, DEFAULT_IGNORE_GLOBS)
-            self._set_text_lines(self.exclude_paths_text, [])
-            self.status_var.set("Ignore rules restored to defaults.")
-
-        def apply_tibia_ignore_defaults(self):
-            self._set_text_lines(
-                self.ignore_dirs_text,
-                sorted(set(DEFAULT_IGNORE_DIRS + TIBIA_IDLE_EXTRA_IGNORE_DIRS), key=str.lower),
-            )
-            self._set_text_lines(
-                self.ignore_globs_text,
-                sorted(set(DEFAULT_IGNORE_GLOBS + TIBIA_IDLE_EXTRA_IGNORE_GLOBS), key=str.lower),
-            )
-            self.status_var.set("Tibia Idle ignore rules applied.")
-
-        # ------------------------ scan / preview ------------------------
-
-        def validate_paths(self) -> tuple[Path, Path]:
+        def validate_paths(self):
             root = Path(self.project_var.get()).expanduser()
             if not root.is_dir():
                 raise ValueError("Choose a valid source project folder.")
-
             output_text = self.output_var.get().strip()
             output = Path(output_text).expanduser() if output_text else root / DEFAULT_OUTPUT_DIRNAME
             return root, output
 
-        def queue_log(self, message: str):
-            self.ui_queue.put(("log", message))
-
         def start_scan(self):
-            if self.scan_thread and self.scan_thread.is_alive():
+            if self.busy:
                 return
             try:
                 root, output = self.validate_paths()
@@ -1567,11 +1382,10 @@ def launch_gui() -> None:
                 messagebox.showerror(APP_NAME, str(exc))
                 return
 
-            self.stop_event.clear()
-            self.scan_rows = []
+            self.busy = True
+            self.scan_btn.configure(state="disabled")
+            self.generate_btn.configure(state="disabled")
             self.status_var.set("Scanning...")
-            self.stats_var.set("Scanning project...")
-            self.preview_tree.delete(*self.preview_tree.get_children())
 
             def worker():
                 try:
@@ -1580,41 +1394,71 @@ def launch_gui() -> None:
                         output,
                         cfg,
                         progress=lambda m: self.ui_queue.put(("status", m)),
-                        stop_event=self.stop_event,
                     )
-                    self.ui_queue.put(("scan_done", rows))
+                    self.ui_queue.put(("scan_done", (rows, cfg)))
                 except Exception as exc:
-                    self.ui_queue.put(("error", f"Scan failed:\n{exc}"))
+                    self.ui_queue.put(("error", str(exc)))
+                finally:
+                    self.ui_queue.put(("idle", None))
 
-            self.scan_thread = threading.Thread(target=worker, daemon=True)
-            self.scan_thread.start()
+            threading.Thread(target=worker, daemon=True).start()
+
+        def start_generate(self):
+            if self.busy:
+                return
+            try:
+                root, output = self.validate_paths()
+                cfg = self.current_config()
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+                return
+
+            self.busy = True
+            self.scan_btn.configure(state="disabled")
+            self.generate_btn.configure(state="disabled")
+            self.status_var.set("Generating...")
+
+            def worker():
+                try:
+                    result = export_project(
+                        root,
+                        output,
+                        cfg,
+                        progress=lambda m: self.ui_queue.put(("status", m)),
+                    )
+                    self.ui_queue.put(("generate_done", result))
+                except Exception as exc:
+                    self.ui_queue.put(("error", str(exc)))
+                finally:
+                    self.ui_queue.put(("idle", None))
+
+            threading.Thread(target=worker, daemon=True).start()
 
         @staticmethod
-        def human_size(size: int) -> str:
+        def human_size(size):
             value = float(size)
             for unit in ("B", "KB", "MB", "GB"):
                 if value < 1024 or unit == "GB":
                     return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
                 value /= 1024
-            return f"{size} B"
+            return str(size)
 
         def refresh_preview(self):
-            if not hasattr(self, "preview_tree"):
+            if not hasattr(self, "tree"):
                 return
-            query = self.preview_search_var.get().strip().lower()
-            mode = self.preview_mode_var.get()
 
-            self.preview_tree.delete(*self.preview_tree.get_children())
+            self.tree.delete(*self.tree.get_children())
+            query = self.search_var.get().strip().lower()
+            mode = self.view_mode_var.get()
 
             visible = 0
             for row in self.scan_rows:
                 if mode != "All" and row.status != mode:
                     continue
-                hay = f"{row.path} {row.reason} {row.extension}".lower()
-                if query and query not in hay:
+                if query and query not in f"{row.path} {row.reason}".lower():
                     continue
 
-                self.preview_tree.insert(
+                self.tree.insert(
                     "",
                     "end",
                     values=(
@@ -1628,59 +1472,38 @@ def launch_gui() -> None:
                 visible += 1
 
             included = [r for r in self.scan_rows if r.status == "Included"]
-            ignored = [r for r in self.scan_rows if r.status == "Ignored"]
             total_lines = sum(r.lines for r in included)
             total_bytes = sum(r.size_bytes for r in included)
-            approx_tokens = max(1, total_bytes // 4) if included else 0
+            tokens = total_bytes // 4 if included else 0
 
-            self.stats_var.set(
-                f"Included: {len(included):,}  |  Ignored: {len(ignored):,}  |  "
-                f"Source lines: {total_lines:,}  |  Approx. raw tokens: {approx_tokens:,}  |  "
-                f"Visible rows: {visible:,}"
+            folder_counts = {}
+            for r in included:
+                folder_counts[r.group] = folder_counts.get(r.group, 0) + 1
+
+            folder_summary = ", ".join(
+                f"{k}: {v:,}"
+                for k, v in sorted(folder_counts.items(), key=lambda kv: kv[0].lower())
             )
 
-        # ------------------------ export ------------------------
+            self.stats_var.set(
+                f"Included {len(included):,} files | {total_lines:,} lines | ~{tokens:,} tokens"
+                + (f" | {folder_summary}" if folder_summary else "")
+            )
 
-        def start_export(self):
-            if self.export_thread and self.export_thread.is_alive():
-                return
-
+        def save_settings(self):
             try:
-                root, output = self.validate_paths()
-                cfg = self.current_config()
+                root, _ = self.validate_paths()
+                path = save_config(root, self.current_config())
+                self.status_var.set(f"Saved {path.name}")
+                messagebox.showinfo(APP_NAME, f"Settings saved:\n{path}")
             except Exception as exc:
                 messagebox.showerror(APP_NAME, str(exc))
-                return
-
-            self.notebook.select(self.tab_generate)
-            self.log_text.delete("1.0", "end")
-            self.generate_button.configure(state="disabled")
-            self.status_var.set("Generating Project Bible...")
-
-            scan_snapshot = list(self.scan_rows) if self.scan_rows else None
-
-            def worker():
-                try:
-                    result = export_project(
-                        root,
-                        output,
-                        cfg,
-                        scan_rows=scan_snapshot,
-                        progress=lambda m: self.ui_queue.put(("log", m)),
-                    )
-                    self.ui_queue.put(("export_done", result))
-                except Exception as exc:
-                    self.ui_queue.put(("error", f"Generation failed:\n{exc}"))
-                    self.ui_queue.put(("export_finished", None))
-
-            self.export_thread = threading.Thread(target=worker, daemon=True)
-            self.export_thread.start()
 
         def open_output(self):
             try:
                 _, output = self.validate_paths()
                 if not output.exists():
-                    messagebox.showwarning(APP_NAME, "The output folder does not exist yet.")
+                    messagebox.showwarning(APP_NAME, "Output folder does not exist yet.")
                     return
 
                 if sys.platform.startswith("win"):
@@ -1692,81 +1515,74 @@ def launch_gui() -> None:
             except Exception as exc:
                 messagebox.showerror(APP_NAME, str(exc))
 
-        # ------------------------ async queue ------------------------
-
-        def _append_log(self, message: str):
-            self.log_text.insert("end", str(message) + "\n")
-            self.log_text.see("end")
-
-        def _process_ui_queue(self):
+        def _process_queue(self):
             try:
                 while True:
                     kind, payload = self.ui_queue.get_nowait()
 
                     if kind == "status":
                         self.status_var.set(str(payload))
-                    elif kind == "log":
-                        self._append_log(str(payload))
-                        self.status_var.set(str(payload))
+
                     elif kind == "scan_done":
-                        self.scan_rows = payload
+                        rows, cfg = payload
+                        self.scan_rows = rows
                         self.refresh_preview()
+                        warnings = validate_scan(cfg, rows)
                         self.status_var.set("Scan complete.")
-                    elif kind == "export_done":
-                        result: ExportResult = payload
-                        self._append_log("")
-                        self._append_log(f"Exported files: {result.exported:,}")
-                        self._append_log(f"Bundles: {result.bundles:,}")
-                        self._append_log(f"Source lines: {result.source_lines:,}")
-                        self._append_log(f"Approx. raw tokens: {result.estimated_tokens:,}")
-                        self._append_log(f"Added: {result.added:,} | Modified: {result.modified:,} | Removed: {result.removed:,}")
-                        self._append_log(f"Output: {result.output_dir}")
-                        self.status_var.set("Project Bible generated successfully.")
-                        self.generate_button.configure(state="normal")
+                        if warnings:
+                            messagebox.showwarning(
+                                APP_NAME,
+                                "Scan completed with warnings:\n\n" + "\n".join(f"• {w}" for w in warnings),
+                            )
+
+                    elif kind == "generate_done":
+                        result = payload
+                        self.status_var.set("Bible generated successfully.")
+                        folder_text = "\n".join(
+                            f"{name}: {count:,} files"
+                            for name, count in sorted(result.folder_counts.items(), key=lambda kv: kv[0].lower())
+                        )
                         messagebox.showinfo(
                             APP_NAME,
-                            "Project Bible generated successfully!\n\n"
-                            f"Files: {result.exported:,}\n"
+                            "Project Bible generated!\n\n"
+                            f"Source files: {result.exported:,}\n"
                             f"Bundles: {result.bundles:,}\n"
                             f"Source lines: {result.source_lines:,}\n"
                             f"Approx. raw tokens: {result.estimated_tokens:,}\n\n"
-                            f"{result.output_dir}",
+                            f"{folder_text}\n\n"
+                            f"Output:\n{result.output_dir}",
                         )
-                    elif kind == "export_finished":
-                        self.generate_button.configure(state="normal")
+
                     elif kind == "error":
                         self.status_var.set("Error.")
-                        self.generate_button.configure(state="normal")
                         messagebox.showerror(APP_NAME, str(payload))
+
+                    elif kind == "idle":
+                        self.busy = False
+                        self.scan_btn.configure(state="normal")
+                        self.generate_btn.configure(state="normal")
 
             except queue.Empty:
                 pass
 
-            self.after(100, self._process_ui_queue)
+            self.after(100, self._process_queue)
 
     App().mainloop()
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=APP_NAME)
-    parser.add_argument("--project", help="Source project folder")
-    parser.add_argument("--output", help="Output folder")
-    parser.add_argument("--preset", choices=["default", "tibia-idle"], default="default")
-    parser.add_argument("--roots", nargs="*", help="Top-level folders to include")
-    parser.add_argument("--max-lines", type=int, help="Maximum lines per generated bundle")
-    parser.add_argument("--max-file-mb", type=float, help="Maximum source file size in MB")
-    parser.add_argument("--no-gitignore", action="store_true")
-    parser.add_argument("--no-git-diff", action="store_true")
-    parser.add_argument("--save-config", action="store_true")
-    parser.add_argument("--gui", action="store_true")
-    return parser
+def build_parser():
+    p = argparse.ArgumentParser(description=APP_NAME)
+    p.add_argument("--project")
+    p.add_argument("--output")
+    p.add_argument("--roots", nargs="*")
+    p.add_argument("--max-lines", type=int)
+    p.add_argument("--no-gitignore", action="store_true")
+    p.add_argument("--no-git-diff", action="store_true")
+    p.add_argument("--gui", action="store_true")
+    return p
 
 
-def main() -> int:
+def main():
     args = build_parser().parse_args()
 
     if args.gui or not args.project:
@@ -1778,28 +1594,19 @@ def main() -> int:
         print(f"Invalid project: {root}", file=sys.stderr)
         return 2
 
-    cfg = tibia_idle_config() if args.preset == "tibia-idle" else load_config(root)
-
+    cfg = load_config(root)
     if args.roots is not None:
         cfg["selected_roots"] = args.roots
     if args.max_lines is not None:
         cfg["max_lines_per_bundle"] = args.max_lines
-    if args.max_file_mb is not None:
-        cfg["max_source_file_mb"] = args.max_file_mb
     if args.no_gitignore:
         cfg["respect_gitignore"] = False
     if args.no_git_diff:
         cfg["include_git_diff"] = False
 
-    if args.save_config:
-        path = save_config(root, cfg)
-        print(f"Saved config: {path}")
-
     output = Path(args.output).expanduser().resolve() if args.output else root / DEFAULT_OUTPUT_DIRNAME
 
-    rows = scan_project(root, output, cfg, progress=print)
-    result = export_project(root, output, cfg, scan_rows=rows, progress=print)
-
+    result = export_project(root, output, cfg, progress=print)
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0
 
