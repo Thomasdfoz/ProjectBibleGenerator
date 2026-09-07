@@ -1,130 +1,118 @@
-# Project Bible Generator v3
+# Project Bible Generator v4
 
-A generic desktop utility for turning **any source project** into a searchable Markdown “Bible” for AI tools and ChatGPT Projects.
+A generic desktop utility that turns **any source project** into a searchable Markdown “Bible” for ChatGPT Projects and other AI workflows.
 
-## v3: simplified interface
+## v4 — rules separated from navigation
 
-The UI now has only two tabs.
-
-### Project Bible
-
-This is the screen you use every day:
-
-1. Choose the source project folder.
-2. Choose the output folder.
-3. Check/uncheck the project folders that should be included.
-4. Click **SCAN PROJECT**.
-5. Review the preview.
-6. Click **GENERATE BIBLE**.
-
-There are no framework-specific or project-specific buttons.
-
-### Advanced Settings
-
-Only open this when you need it.
-
-You can change:
-
-- included source extensions;
-- ignored directory names;
-- ignored glob patterns;
-- specific excluded relative paths;
-- special filenames;
-- root file inclusion;
-- maximum source-file size;
-- Git status/diff behavior.
-
-## Important v3 fixes
-
-### Generation always rescans
-
-v2 could reuse an old Preview after the inclusion settings changed.
-
-v3 always performs a fresh scan using the current settings when **GENERATE BIBLE** is clicked.
-
-### Folder warnings
-
-If you selected a folder and it produces zero included source files, the app warns you.
-
-Example:
-
-```text
-Selected folder "Client" has 0 included files.
-```
-
-This prevents accidentally generating an incomplete Bible without noticing.
-
-### Clear folder checkboxes
-
-Folders are now normal checkboxes.
-
-No blue multi-selection list.
-
-### Extensions moved to Advanced Settings
-
-Most users do not need to manually select 40 source extensions every time.
-
-Recommended source extensions are enabled by default.
-
-### Git identity
-
-Generated support files include:
-
-- current Git branch;
-- current Git HEAD commit.
-
-### Generator output removed from Git status
-
-If the Bible is generated inside the repository, the output folder is filtered out of the `98_RECENT_CHANGES.md` Git status section.
-
-### New `02_CODE_MAP.md`
-
-A compact source map is generated in addition to the full tree.
-
-## Generated output
+The generated support files now have clear responsibilities:
 
 ```text
 ProjectBible/
-├── 00_PROJECT_INDEX.md
-├── 01_AI_INSTRUCTIONS.md
-├── 02_CODE_MAP.md
+├── 00_AI_RULES.md
+├── 01_BIBLE_GUIDE.md
+├── 02_PROJECT_INDEX.md
+├── 03_CODE_MAP.md
 ├── 10_ROOT_001.md
-├── 20_SourceFolder_001.md
-├── 20_SourceFolder_002.md
+├── 20_<folder>_001.md
 ├── ...
 ├── 98_RECENT_CHANGES.md
 ├── 99_PROJECT_TREE.md
 └── _projectbible_manifest.json
 ```
 
-## Original source paths
+### `00_AI_RULES.md`
 
-Every source section keeps the real path:
+Mandatory AI behavior.
+
+It contains generic safety/workflow rules plus optional project-specific rules.
+
+Project/assistant instructions should explicitly tell the AI to read this file first.
+
+### `01_BIBLE_GUIDE.md`
+
+Navigation manual only:
+
+- how to use the index;
+- how to use the code map;
+- how to use recent changes;
+- when to open bundles;
+- why `FROM:` is the real source path.
+
+### `02_PROJECT_INDEX.md`
+
+Maps every original source path to the bundle containing it.
+
+### `03_CODE_MAP.md`
+
+Compact list of included original source files grouped by top-level folder.
+
+## AI Rules tab
+
+v4 adds a dedicated **AI Rules** tab.
+
+Write only rules that are specific to the current project, for example:
 
 ```md
-## FROM: `src/services/users.ts`
-- SHA256: `...`
-- SOURCE_LINES: 240
-- SOURCE_BYTES: 8124
-
-```typescript
-// source code
-```
+- `Server/` is the authoritative backend.
+- `ClientSource/` is the editable client source.
+- `ClientRuntime/` is a generated/runnable copy and should not be edited first.
+- Do not change production deployment configuration without explicit approval.
 ```
 
-The generated bundle filename is never treated as the real source path.
-
-## Bundle limit
-
-Default:
+The text is saved in the source project as:
 
 ```text
-10,000 lines per bundle
+.projectbible-rules.md
 ```
 
-A source file stays together whenever possible.
+That file is generator metadata and is **not duplicated into the source bundles**.
 
-A source file is split only if that single source file cannot fit inside one bundle.
+When the Bible is generated, those project-specific rules are appended to `00_AI_RULES.md`.
+
+## ChatGPT Project instruction
+
+The AI Rules tab includes a **Copy ChatGPT instruction** button.
+
+Paste the copied instruction into the ChatGPT Project's instruction field.
+
+The default instruction is intentionally short:
+
+> Before any technical task about this project, read and follow `00_AI_RULES.md` first. Then use `01_BIBLE_GUIDE.md` to navigate the Bible, `02_PROJECT_INDEX.md` to locate source files, `03_CODE_MAP.md` to understand the structure, and `98_RECENT_CHANGES.md` for recent work. Never treat generated bundle files as real source files; always use the original path shown after `FROM:`.
+
+This means the ChatGPT Project instruction can remain almost identical for every project.  
+Project-specific behavior belongs in `.projectbible-rules.md` / `00_AI_RULES.md`.
+
+## Main workflow
+
+1. Choose the source project.
+2. Choose which top-level folders belong in the Bible.
+3. Optionally add project-specific rules in **AI Rules**.
+4. Click **SCAN PROJECT**.
+5. Review included/ignored files.
+6. Click **GENERATE BIBLE**.
+7. Upload the generated Bible files as Project Sources.
+8. Paste the copied ChatGPT Project instruction once.
+
+## Advanced Settings
+
+You normally do not need this tab.
+
+It controls:
+
+- source extensions;
+- ignored directory names;
+- ignored glob patterns;
+- excluded relative paths;
+- special filenames;
+- `.gitignore`;
+- Git status/diff;
+- max source file size.
+
+## Bundle size
+
+The default hard limit remains 10,000 lines, and can be changed in the main window.
+
+A source file stays together whenever possible. It is split only if that individual file cannot fit in one bundle.
 
 ## Windows
 
@@ -134,6 +122,4 @@ Extract the ZIP and double-click:
 RUN_Project_Bible_Generator.bat
 ```
 
-Python 3.10+ is recommended.
-
-No pip packages are required.
+Python 3.10+ is recommended. No pip packages are required.

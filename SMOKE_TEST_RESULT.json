@@ -1,11 +1,16 @@
 {
   "syntax_ok": true,
   "cli_ok": true,
-  "cli_stderr": "dsheet_warmup.py\", line 704, in _warm_collaboration_flows\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/generated/interface/models.py\", line 32317, in hydrate_crdt_from_proto\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/remote.py\", line 749, in __call__\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/client.py\", line 150, in call\nartifact_tool.rpc.client.RemoteError: hydrateCrdtFromProto requires an empty collaborative document.\n",
-  "max_bundle_lines": 99,
+  "cli_stderr": "Spreadsheet runtime warmup failed during python startup\nTraceback (most recent call last):\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/patches/warm_spreadsheet_runtime_on_startup.py\", line 26, in warm_spreadsheet_runtime_on_startup\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/spreadsheet_warmup.py\", line 772, in warm_spreadsheet_runtime\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/connection.py\", line 37, in get_or_create_client\n  File \"/tmp/tmp.L2TH2Y5coc/artifact_tool_v2-2.8.22/artifact_tool/rpc/daemon.py\", line 124, in start_daemon\nTimeoutError: Timed out waiting for artifact tool daemon socket. Set ARTIFACT_TOOL_RPC_DAEMON_STARTUP_TIMEOUT_S=<seconds> to increase the limit.\n",
+  "rules_generated": true,
+  "guide_generated": true,
+  "index_generated": true,
+  "code_map_generated": true,
+  "custom_rule_present": true,
+  "guide_points_to_rules": true,
+  "guide_points_to_new_index": true,
+  "metadata_not_in_index": true,
+  "old_v3_files_absent": true,
   "bundles_under_100": true,
-  "index_has_frontend": true,
-  "index_has_backend": true,
-  "code_map_exists": true,
-  "manifest_exists": true
+  "max_bundle_lines": 99
 }

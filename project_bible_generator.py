@@ -26,10 +26,13 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 APP_NAME = "Project Bible Generator"
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0"
 CONFIG_FILENAME = ".projectbible.json"
 MANIFEST_FILENAME = "_projectbible_manifest.json"
+PROJECT_RULES_FILENAME = ".projectbible-rules.md"
 DEFAULT_OUTPUT_DIRNAME = "ProjectBible"
+
+CHATGPT_PROJECT_INSTRUCTION = """Before any technical task about this project, read and follow `00_AI_RULES.md` first. Then use `01_BIBLE_GUIDE.md` to navigate the Bible, `02_PROJECT_INDEX.md` to locate source files, `03_CODE_MAP.md` to understand the structure, and `98_RECENT_CHANGES.md` for recent work. Never treat generated bundle files as real source files; always use the original path shown after `FROM:`."""
 
 DEFAULT_MAX_LINES = 10_000
 DEFAULT_MAX_SOURCE_MB = 2.0
@@ -201,7 +204,30 @@ def load_config(project_root: Path) -> dict:
 
 def save_config(project_root: Path, cfg: dict) -> Path:
     path = project_root / CONFIG_FILENAME
-    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Project rules live in their own readable file, not inside the JSON config.
+    clean_cfg = dict(cfg)
+    clean_cfg.pop("project_rules", None)
+    path.write_text(json.dumps(clean_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_project_rules(project_root: Path) -> str:
+    path = project_root / PROJECT_RULES_FILENAME
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def save_project_rules(project_root: Path, rules: str) -> Path:
+    path = project_root / PROJECT_RULES_FILENAME
+    rules = (rules or "").strip()
+    if rules:
+        path.write_text(rules + "\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
     return path
 
 
@@ -320,6 +346,9 @@ def classify_file(
 ) -> tuple[str, str]:
     rel = path.relative_to(root)
     rel_str = normalize_rel(rel)
+
+    if path.name in {CONFIG_FILENAME, PROJECT_RULES_FILENAME}:
+        return "Ignored", "Project Bible metadata"
 
     try:
         path.resolve().relative_to(output_dir.resolve())
@@ -532,11 +561,17 @@ def safe_group_name(group: str) -> str:
 def cleanup_generated_files(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     exact = {
+        # v4 support files
+        "00_AI_RULES.md",
+        "01_BIBLE_GUIDE.md",
+        "02_PROJECT_INDEX.md",
+        "03_CODE_MAP.md",
+        "98_RECENT_CHANGES.md",
+        "99_PROJECT_TREE.md",
+        # old support files from v3; remove them to avoid conflicting guidance
         "00_PROJECT_INDEX.md",
         "01_AI_INSTRUCTIONS.md",
         "02_CODE_MAP.md",
-        "98_RECENT_CHANGES.md",
-        "99_PROJECT_TREE.md",
     }
     for p in output_dir.iterdir():
         if not p.is_file():
@@ -745,6 +780,8 @@ def write_support_files(
     estimated_tokens = max(1, total_bytes // 4)
     git = git_metadata(root)
 
+    custom_rules = str(cfg.get("project_rules") or load_project_rules(root) or "").strip()
+
     common_header = [
         f"- Project: `{root}`",
         f"- Generated: `{now}`",
@@ -752,6 +789,100 @@ def write_support_files(
         f"- Git HEAD: `{git.get('head') or '(not available)'}`",
     ]
 
+    # ------------------------------------------------------------------
+    # 00 — Mandatory rules
+    # ------------------------------------------------------------------
+    rules = [
+        "# AI RULES — READ FIRST",
+        "",
+        "> Mandatory rules for any AI working with this Project Bible.",
+        "> Project/assistant instructions should explicitly require reading this file first.",
+        "",
+        *common_header,
+        "",
+        "## Source of truth",
+        "",
+        "- This Project Bible is a generated snapshot, not the editable source tree.",
+        "- Never treat generated bundle filenames as real project files.",
+        "- Always use the original source path shown after `FROM:`.",
+        "- Do not invent implementation details that were not found in the Bible or another explicitly allowed source.",
+        "- If the snapshot may be stale, say so and check the generation time, Git branch and Git HEAD above.",
+        "",
+        "## Navigation",
+        "",
+        "- Do not read the entire Bible when a targeted search is enough.",
+        "- Read `01_BIBLE_GUIDE.md` for the navigation workflow.",
+        "- Use `02_PROJECT_INDEX.md` to map a real source path to its bundle.",
+        "- Use `03_CODE_MAP.md` for a compact view of the included source tree.",
+        "- Use `98_RECENT_CHANGES.md` first when the task is about recent work.",
+        "",
+        "## Changes and answers",
+        "",
+        "- Prefer the smallest coherent change that solves the requested task.",
+        "- Avoid unrelated refactors, mass formatting and speculative cleanup.",
+        "- Preserve existing project patterns unless the task explicitly requires changing them.",
+        "- When suggesting a manual code change, provide the original file path and, when practical, exact BEFORE and AFTER blocks.",
+        "- Include a short reason for the change and focused validation/test steps.",
+        "- If the necessary source is missing from the Bible, say what is missing instead of guessing.",
+        "",
+        "## Project-specific rules",
+        "",
+    ]
+
+    if custom_rules:
+        rules += [
+            custom_rules,
+            "",
+        ]
+    else:
+        rules += [
+            "_No project-specific rules were configured._",
+            "",
+            f"To add them, edit `{PROJECT_RULES_FILENAME}` in the source project or use the AI Rules tab in {APP_NAME}.",
+            "",
+        ]
+
+    (output_dir / "00_AI_RULES.md").write_text("\n".join(rules), encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # 01 — Guide: how to consume the Bible
+    # ------------------------------------------------------------------
+    guide = [
+        f"# {APP_NAME} — Bible Guide",
+        "",
+        "This file explains how to navigate the generated Project Bible.",
+        "Mandatory behavior belongs in `00_AI_RULES.md`.",
+        "",
+        *common_header,
+        "",
+        "## Recommended lookup order",
+        "",
+        "1. Read and follow `00_AI_RULES.md`.",
+        "2. Search `02_PROJECT_INDEX.md` when you know a filename, symbol, module or likely path.",
+        "3. Use `03_CODE_MAP.md` when you need to understand where a feature probably lives.",
+        "4. Use `98_RECENT_CHANGES.md` first for work involving recent local changes.",
+        "5. Open only the bundle or bundles that contain the relevant original source files.",
+        "6. Use `99_PROJECT_TREE.md` only when a broader directory view is genuinely useful.",
+        "",
+        "## Important bundle rule",
+        "",
+        "Bundle files such as `20_Backend_001.md` or `30_Client_002.md` are containers only.",
+        "The editable source path is always the path written after `FROM:` inside a bundle.",
+        "",
+        "## Efficient task workflow",
+        "",
+        "- Locate the relevant source path.",
+        "- Read the surrounding implementation and directly related files.",
+        "- Make or propose the smallest scoped change.",
+        "- Validate against nearby tests/configuration when available.",
+        "- Do not load unrelated bundles merely because they exist.",
+        "",
+    ]
+    (output_dir / "01_BIBLE_GUIDE.md").write_text("\n".join(guide), encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # 02 — Index
+    # ------------------------------------------------------------------
     index = [
         f"# {APP_NAME} — Project Index",
         "",
@@ -795,25 +926,11 @@ def write_support_files(
             f"| `{f.path}` | `{f.bundle}` | {f.lines} | {f.bytes:,} | `{f.sha256[:16]}` |"
         )
 
-    (output_dir / "00_PROJECT_INDEX.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+    (output_dir / "02_PROJECT_INDEX.md").write_text("\n".join(index) + "\n", encoding="utf-8")
 
-    instructions = [
-        f"# {APP_NAME} — AI Instructions",
-        "",
-        "This folder is a generated textual snapshot of a software project.",
-        "",
-        "1. Use `00_PROJECT_INDEX.md` to locate the real source path and bundle.",
-        "2. Use `02_CODE_MAP.md` for a compact map of the included source files.",
-        "3. Use `98_RECENT_CHANGES.md` first when reviewing the user's latest edits.",
-        "4. Always reference the original path after `FROM:` — never the generated bundle path.",
-        "5. Prefer minimal changes and avoid unrelated refactors.",
-        "6. When practical, answer with exact BEFORE and AFTER code blocks.",
-        "",
-        *common_header,
-        "",
-    ]
-    (output_dir / "01_AI_INSTRUCTIONS.md").write_text("\n".join(instructions), encoding="utf-8")
-
+    # ------------------------------------------------------------------
+    # 03 — Code Map
+    # ------------------------------------------------------------------
     code_map = [
         f"# {APP_NAME} — Code Map",
         "",
@@ -830,8 +947,11 @@ def write_support_files(
             code_map.append(f"- `{path}`")
         code_map.append("")
 
-    (output_dir / "02_CODE_MAP.md").write_text("\n".join(code_map), encoding="utf-8")
+    (output_dir / "03_CODE_MAP.md").write_text("\n".join(code_map), encoding="utf-8")
 
+    # ------------------------------------------------------------------
+    # 98 / 99
+    # ------------------------------------------------------------------
     tree = [
         f"# {APP_NAME} — Project Tree",
         "",
@@ -875,13 +995,16 @@ def write_support_files(
 
     (output_dir / "98_RECENT_CHANGES.md").write_text("\n".join(recent) + "\n", encoding="utf-8")
 
+    manifest_cfg = dict(cfg)
+    manifest_cfg.pop("project_rules", None)
     manifest = {
         "app": APP_NAME,
         "version": APP_VERSION,
         "project_root": str(root),
         "generated_at": now,
         "git": git,
-        "config": cfg,
+        "config": manifest_cfg,
+        "project_rules_file": PROJECT_RULES_FILENAME if custom_rules else None,
         "bundles": [p.name for p in bundles],
         "files": [asdict(f) for f in files],
     }
@@ -889,7 +1012,6 @@ def write_support_files(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
 
 def validate_scan(cfg: dict, rows: list[ScanRow]) -> list[str]:
     warnings: list[str] = []
@@ -1065,11 +1187,14 @@ def launch_gui() -> None:
             notebook.pack(fill="both", expand=True, padx=14, pady=(0, 8))
 
             self.main_tab = ttk.Frame(notebook, padding=14)
+            self.rules_tab = ttk.Frame(notebook, padding=14)
             self.advanced_tab = ttk.Frame(notebook, padding=14)
             notebook.add(self.main_tab, text="Project Bible")
+            notebook.add(self.rules_tab, text="AI Rules")
             notebook.add(self.advanced_tab, text="Advanced Settings")
 
             self._build_main()
+            self._build_rules()
             self._build_advanced()
 
             footer = ttk.Frame(self, padding=(14, 0, 14, 10))
@@ -1189,6 +1314,59 @@ def launch_gui() -> None:
             sy.grid(row=0, column=1, sticky="ns")
             sx.grid(row=1, column=0, sticky="ew")
 
+        def _build_rules(self):
+            f = self.rules_tab
+            f.columnconfigure(0, weight=1)
+            f.rowconfigure(2, weight=1)
+
+            ttk.Label(f, text="Project-specific AI rules", style="Section.TLabel").grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(
+                f,
+                text=(
+                    "Optional rules for this specific project. They are appended to the mandatory "
+                    "generic rules and generated inside 00_AI_RULES.md. "
+                    f"They are stored locally as {PROJECT_RULES_FILENAME}."
+                ),
+                wraplength=950,
+            ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+
+            self.project_rules_text = tk.Text(f, wrap="word")
+            self.project_rules_text.grid(row=2, column=0, sticky="nsew")
+
+            rules_buttons = ttk.Frame(f)
+            rules_buttons.grid(row=3, column=0, sticky="w", pady=(8, 14))
+            ttk.Button(rules_buttons, text="Save project rules", command=self.save_rules_only).pack(side="left")
+            ttk.Button(rules_buttons, text="Reload from project", command=self.reload_project_rules).pack(side="left", padx=6)
+            ttk.Button(rules_buttons, text="Clear", command=lambda: self.project_rules_text.delete("1.0", "end")).pack(side="left")
+
+            ttk.Separator(f).grid(row=4, column=0, sticky="ew", pady=(0, 12))
+
+            ttk.Label(f, text="ChatGPT Project instruction", style="Section.TLabel").grid(
+                row=5, column=0, sticky="w"
+            )
+            ttk.Label(
+                f,
+                text=(
+                    "Paste this short instruction into the ChatGPT Project instructions. "
+                    "The project-specific behavior then lives in 00_AI_RULES.md instead of being duplicated in ChatGPT settings."
+                ),
+                wraplength=950,
+            ).grid(row=6, column=0, sticky="w", pady=(4, 6))
+
+            instruction = tk.Text(f, height=5, wrap="word")
+            instruction.grid(row=7, column=0, sticky="ew")
+            instruction.insert("1.0", CHATGPT_PROJECT_INSTRUCTION)
+            instruction.configure(state="disabled")
+            self.chatgpt_instruction_text = instruction
+
+            ttk.Button(
+                f,
+                text="Copy ChatGPT instruction",
+                command=self.copy_chatgpt_instruction,
+            ).grid(row=8, column=0, sticky="w", pady=(8, 0))
+
         def _build_advanced(self):
             f = self.advanced_tab
             f.columnconfigure(0, weight=1)
@@ -1284,6 +1462,8 @@ def launch_gui() -> None:
                 "respect_gitignore": self.gitignore_var.get(),
                 "include_git_diff": self.gitdiff_var.get(),
                 "git_diff_max_lines": git_lines,
+                "project_rules": self.project_rules_text.get("1.0", "end").strip()
+                    if hasattr(self, "project_rules_text") else "",
             }
 
         def apply_config(self, cfg):
@@ -1314,6 +1494,7 @@ def launch_gui() -> None:
             self.output_var.set(str(root / DEFAULT_OUTPUT_DIRNAME))
             self.load_folder_checkboxes(root)
             self.apply_config(load_config(root))
+            self.reload_project_rules()
             self.scan_rows = []
             self.refresh_preview()
             self.status_var.set(f"Loaded: {root.name}")
@@ -1490,12 +1671,50 @@ def launch_gui() -> None:
                 + (f" | {folder_summary}" if folder_summary else "")
             )
 
+        def reload_project_rules(self):
+            if not hasattr(self, "project_rules_text"):
+                return
+            self.project_rules_text.delete("1.0", "end")
+            try:
+                root = Path(self.project_var.get()).expanduser()
+                if root.is_dir():
+                    rules = load_project_rules(root)
+                    if rules:
+                        self.project_rules_text.insert("1.0", rules)
+            except Exception:
+                pass
+
+        def save_rules_only(self):
+            try:
+                root, _ = self.validate_paths()
+                rules = self.project_rules_text.get("1.0", "end").strip()
+                path = save_project_rules(root, rules)
+                if rules:
+                    self.status_var.set(f"Saved {path.name}")
+                    messagebox.showinfo(APP_NAME, f"Project AI rules saved:\n{path}")
+                else:
+                    self.status_var.set("Project-specific AI rules cleared.")
+                    messagebox.showinfo(APP_NAME, "Project-specific AI rules cleared.")
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+
+        def copy_chatgpt_instruction(self):
+            self.clipboard_clear()
+            self.clipboard_append(CHATGPT_PROJECT_INSTRUCTION)
+            self.update()
+            self.status_var.set("ChatGPT Project instruction copied to clipboard.")
+
         def save_settings(self):
             try:
                 root, _ = self.validate_paths()
-                path = save_config(root, self.current_config())
-                self.status_var.set(f"Saved {path.name}")
-                messagebox.showinfo(APP_NAME, f"Settings saved:\n{path}")
+                cfg = self.current_config()
+                path = save_config(root, cfg)
+                save_project_rules(root, cfg.get("project_rules", ""))
+                self.status_var.set(f"Saved {path.name} and AI rules")
+                messagebox.showinfo(
+                    APP_NAME,
+                    f"Settings saved:\n{path}\n\nAI rules file: {PROJECT_RULES_FILENAME}",
+                )
             except Exception as exc:
                 messagebox.showerror(APP_NAME, str(exc))
 
